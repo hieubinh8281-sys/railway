@@ -4440,27 +4440,6 @@ HTML_TEMPLATE = """
                 btn.classList.remove('opacity-60', 'cursor-not-allowed');
             }
         }
-            }
-
-            // Chế độ Local chạy trực tiếp trên trình duyệt
-            const btn = document.getElementById('btnAutoAll');
-            btn.disabled = true;
-            btn.classList.add('opacity-60', 'cursor-not-allowed');
-
-            try {
-                const ok1 = await stepTranscribe();
-                if (!ok1) return;
-                const ok2 = await stepTranslate(false);
-                if (!ok2) {
-                    alert("⚠️ Bước 2 (Dịch thuật) chưa hoàn tất! Quá trình tự động dừng lại để bạn kiểm tra kịch bản.");
-                    return;
-                }
-                await stepRender();
-            } finally {
-                btn.disabled = false;
-                btn.classList.remove('opacity-60', 'cursor-not-allowed');
-            }
-        }
 
         let pollTimer = null;
         function startPolling() {
@@ -4681,7 +4660,7 @@ def api_cloud_dispatch():
     if not os.path.exists(video_path):
         return jsonify({"error": "Vui lòng chọn tải Video lên trước khi chạy!"}), 400
 
-    consume_license_quota(key_str, 1)
+    consume_license_quota(key_str, 1, device_id=dev_id)
 
     data = request.json or {}
     provider = data.get("provider", "kaggle")
@@ -6057,7 +6036,7 @@ def api_pipeline_start_auto():
         return jsonify({"error": "Vui lòng tải video lên trước khi chạy tiến trình 24/7!"}), 400
 
     # Khấu trừ hạn mức 1 lượt
-    consume_license_quota(key_str, 1)
+    consume_license_quota(key_str, 1, device_id=dev_id)
 
     settings = data.get("settings", {})
     api_keys = data.get("apiKeys", [])
@@ -6324,13 +6303,19 @@ def api_license_status():
     key_str = payload if isinstance(payload, str) else (payload.get("key_str", "") if isinstance(payload, dict) else str(payload or ""))
     db = load_license_db()
     k_rec = db.get("keys", {}).get(key_str, {})
+    limit = k_rec.get("quota_limit", 50)
+    used = k_rec.get("quota_used", 0)
+    if key_str == "NEXUS-FREE-DEMO-2USES" and dev_id:
+        used = k_rec.get("device_usage", {}).get(dev_id, 0)
+        limit = 2
+
     return jsonify({
         "active": True,
         "key": key_str,
         "customer": k_rec.get("customer", ""),
         "tier": k_rec.get("tier", "pro"),
-        "quota_limit": k_rec.get("quota_limit", 50),
-        "quota_used": k_rec.get("quota_used", 0),
+        "quota_limit": limit,
+        "quota_used": used,
         "expires_at": k_rec.get("expires_at", ""),
         "bound_device_id": dev_id
     })
