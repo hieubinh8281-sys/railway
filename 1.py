@@ -3139,10 +3139,14 @@ HTML_TEMPLATE = """
             const lInfo = langCatalog[langCode] || { lang_label: "Tiếng Việt", google_code: "vi" };
             const transEngine = document.getElementById('translationEngine') ? document.getElementById('translationEngine').value : 'hybrid';
             const srcLang = document.getElementById('whisperSourceLang') ? document.getElementById('whisperSourceLang').value : 'auto';
+            const wModel = document.getElementById('whisperModel') ? document.getElementById('whisperModel').value : 'base';
+            const wDevice = document.getElementById('whisperDevice') ? document.getElementById('whisperDevice').value : 'auto';
             return {
                 extractMode,
                 translationEngine: transEngine,
                 whisperSourceLang: srcLang,
+                whisperModel: wModel,
+                whisperDevice: wDevice,
                 targetLang: langCode,
                 targetLangLabel: lInfo.lang_label,
                 googleLangCode: lInfo.google_code,
@@ -4124,10 +4128,12 @@ HTML_TEMPLATE = """
 
                     if (data.error && !data.status) {
                         clearInterval(serverJobTimer);
+                        serverJobTimer = null;
                         document.getElementById('statusSpinner').classList.add('hidden');
                         document.getElementById('btnAutoAll').disabled = false;
                         document.getElementById('btnAutoAll').classList.remove('opacity-60', 'cursor-not-allowed');
-                        alert("Lỗi tiến trình 24/7: " + data.error);
+                        const errDesc = data.error || data.message || "Lỗi kết nối máy chủ";
+                        alert("Lỗi tiến trình 24/7: " + errDesc);
                         return;
                     }
 
@@ -4191,7 +4197,8 @@ HTML_TEMPLATE = """
                         document.getElementById('statusSpinner').classList.add('hidden');
                         document.getElementById('btnAutoAll').disabled = false;
                         document.getElementById('btnAutoAll').classList.remove('opacity-60', 'cursor-not-allowed');
-                        alert("Tiến trình 24/7 gặp lỗi: " + data.error);
+                        const errDesc = data.error || data.message || "Đã xảy ra sự cố trong quá trình xử lý 24/7 trên máy chủ.";
+                        alert("Tiến trình 24/7 gặp lỗi: " + errDesc);
                     }
                 } catch (e) {
                     console.warn("Polling retry...", e);
@@ -4934,11 +4941,15 @@ def do_transcribe_core(video_path, model_size="small", device_req="auto", source
     compute_mode = "int8"
     model = None
 
-    # Danh sách fallback an toàn để chống tràn RAM / OOM trên Cloud Container (Railway/VPS)
-    models_to_try = [model_size]
-    for fb in ["base", "tiny"]:
-        if fb not in models_to_try:
-            models_to_try.append(fb)
+    # Tự động ưu tiên base/tiny trên Cloud/Railway để đảm bảo không bao giờ bị OOM tràn RAM
+    is_cloud_env = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT"))
+    if is_cloud_env and model_size == "small":
+        models_to_try = ["base", "tiny", "small"]
+    else:
+        models_to_try = [model_size]
+        for fb in ["base", "tiny"]:
+            if fb not in models_to_try:
+                models_to_try.append(fb)
 
     for m_cand in models_to_try:
         try:
@@ -4967,24 +4978,46 @@ def do_transcribe_core(video_path, model_size="small", device_req="auto", source
     _, _, total_dur = get_video_info(video_path)
     progress_cb(20, f"Bắt đầu tách giọng nói bằng Whisper ({device_mode.upper()})...")
 
+    # Chuẩn hóa trích xuất âm thanh sang 16kHz mono WAV để tránh lỗi PyAV trên video quay từ điện thoại (iOS/Android)
+    wav_path = os.path.join(os.path.dirname(video_path), "extracted_whisper_input.wav")
+    audio_target = video_path
+    try:
+        cmd_wav = [
+            "ffmpeg", "-y", "-i", video_path, "-vn",
+            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            wav_path
+        ]
+        ret_wav = subprocess.run(cmd_wav, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+        if ret_wav.returncode == 0 and os.path.exists(wav_path) and os.path.getsize(wav_path) > 100:
+            audio_target = wav_path
+    except Exception as e_wav:
+        print(f"[!] Ghi chú trích xuất WAV phụ: {e_wav}", flush=True)
+
     transcribe_args = {"beam_size": 5}
     if source_lang and source_lang != "auto":
         transcribe_args["language"] = source_lang
 
-    raw_segments, info = model.transcribe(video_path, **transcribe_args)
-    detected_lang = getattr(info, "language", None)
+    try:
+        raw_segments, info = model.transcribe(audio_target, **transcribe_args)
+        detected_lang = getattr(info, "language", None)
 
-    segments = []
-    for idx, seg in enumerate(raw_segments, start=1):
-        segments.append({
-            "id": idx,
-            "start": round(seg.start, 2),
-            "end": round(seg.end, 2),
-            "text": seg.text.strip(),
-            "trans": ""
-        })
-        pct = 25 + (int((seg.end / total_dur) * 72) if total_dur > 0 else min(70, idx))
-        progress_cb(min(98, pct), f"Đã tách câu #{idx}: {seg.text[:28]}...")
+        segments = []
+        for idx, seg in enumerate(raw_segments, start=1):
+            segments.append({
+                "id": idx,
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+                "text": seg.text.strip(),
+                "trans": ""
+            })
+            pct = 25 + (int((seg.end / total_dur) * 72) if total_dur > 0 else min(70, idx))
+            progress_cb(min(98, pct), f"Đã tách câu #{idx}: {seg.text[:28]}...")
+    finally:
+        if audio_target != video_path and os.path.exists(audio_target):
+            try:
+                os.remove(audio_target)
+            except Exception:
+                pass
 
     progress_cb(100, f"Hoàn tất tách {len(segments)} câu phụ đề!")
     return segments, detected_lang, device_mode
@@ -5588,20 +5621,38 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                 if res:
                     synced.append(res)
 
+        orig_a = None
         if has_audio_stream(video_path):
-            orig_a = AudioSegment.from_file(video_path)
-            master_a = AudioSegment.silent(duration=len(orig_a)) if orig_volume <= 0.01 else orig_a.apply_gain(20 * math.log10(orig_volume))
+            try:
+                orig_a = AudioSegment.from_file(video_path)
+            except Exception as e_a:
+                print(f"[!] Chú ý: Không đọc được audio gốc bằng pydub ({e_a}), bỏ qua audio gốc.", flush=True)
+                orig_a = None
+
+        if orig_a is not None and len(orig_a) > 0:
+            vol_mult = orig_volume / 100.0 if orig_volume > 1.0 else orig_volume
+            master_a = AudioSegment.silent(duration=len(orig_a)) if vol_mult <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, vol_mult)))
         else:
-            master_a = AudioSegment.silent(duration=int((max(s["end"] for s in segments) + 2) * 1000))
+            max_end = max((s.get("end", 0.0) for s in segments), default=0.0)
+            master_a = AudioSegment.silent(duration=int((max_end + 2) * 1000))
 
         for pos_ms, clip in synced:
             master_a = master_a.overlay(clip, position=pos_ms)
-        master_a.export(final_audio_path, format="adts")
+        try:
+            master_a.export(final_audio_path, format="adts")
+        except Exception as e_exp:
+            print(f"[!] Lỗi export AAC audio ({e_exp}), thử định dạng mp3...", flush=True)
+            try:
+                master_a.export(final_audio_path, format="mp3")
+            except Exception:
+                pass
 
     # Render video
     if render_mode == "copy":
         cmd = ["ffmpeg", "-y", "-i", video_path, "-i", final_audio_path, "-i", srt_path, "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0", "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text", "-movflags", "+faststart", output_path]
-        subprocess.run(cmd, check=True)
+        res_copy = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+        if res_copy.returncode != 0:
+            raise RuntimeError(f"FFmpeg copy thất bại: {(res_copy.stderr or '')[-300:].strip()}")
         progress_cb(100, "⚡ Xuất tức thì hoàn tất!")
         return {"status": "ok", "render_mode": "copy", "badge_label": "⚡ Xuất Tức Thì", "output_path": output_path}
 
@@ -5631,7 +5682,11 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
         cmd += ["-map", "0:a?"]
 
     cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "21", "-movflags", "+faststart", "-c:a", "aac", "-b:a", "192k", output_path]
-    subprocess.run(cmd, check=True)
+    res_ffmpeg = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    if res_ffmpeg.returncode != 0:
+        err_tail = (res_ffmpeg.stderr or "")[-350:].strip()
+        print(f"[!] Lỗi FFmpeg render: {err_tail}", flush=True)
+        raise RuntimeError(f"FFmpeg render thất bại: {err_tail}")
     progress_cb(100, "Xuất Video hoàn tất 100%!")
     return {"status": "ok", "render_mode": render_mode, "badge_label": "Hoàn tất 100%", "output_path": output_path}
 
@@ -5678,12 +5733,15 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
                 "created_at": datetime.now().isoformat()
             })
             job["percent"] = int(pct)
-            job["message"] = msg
+            job["message"] = str(msg or "")
             job["source_url"] = source_url
             job["updated_at"] = datetime.now().isoformat()
             if step: job["step"] = step
             if status: job["status"] = status
-            if error: job["error"] = error
+            if error:
+                job["error"] = str(error)
+            elif status == "error":
+                job["error"] = str(msg) if str(msg).strip() else "Đã xảy ra lỗi trong tiến trình xử lý máy chủ."
             if output_url: job["output_url"] = output_url
             if segments is not None: job["segments"] = segments
             ACTIVE_SERVER_JOBS[job_id] = job
@@ -5740,9 +5798,10 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
 
     except Exception as e:
         import traceback
-        err_msg = f"{str(e)}: {traceback.format_exc()[-200:]}"
-        print(f"[!] Lỗi 24/7 Background Pipeline (Job {job_id}): {err_msg}", flush=True)
-        update_job(0, f"Lỗi tiến trình 24/7: {str(e)}", status="error", error=str(e))
+        tb_str = traceback.format_exc()
+        err_msg = str(e).strip() or repr(e) or type(e).__name__ or "Đã xảy ra sự cố trong quá trình xử lý 24/7"
+        print(f"[!] Lỗi 24/7 Background Pipeline (Job {job_id}): {err_msg}\n{tb_str}", flush=True)
+        update_job(0, f"Lỗi tiến trình 24/7: {err_msg}", status="error", error=err_msg)
 
 @app.route("/api/pipeline/start_auto", methods=["POST"])
 def api_pipeline_start_auto():
@@ -5779,7 +5838,7 @@ def api_pipeline_start_auto():
         }), 403
 
     video_path = os.path.join(TEMP_DIR, "input_video.mp4")
-    if not os.path.exists(video_path):
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
         return jsonify({"error": "Vui lòng tải video lên trước khi chạy tiến trình 24/7!"}), 400
 
     # Khấu trừ hạn mức 1 lượt
@@ -5820,7 +5879,7 @@ def api_pipeline_job_status(job_id):
                 pass
 
     if not job:
-        return jsonify({"error": "Không tìm thấy tiến trình 24/7 này"}), 404
+        return jsonify({"status": "error", "error": "Không tìm thấy tiến trình 24/7 này trên máy chủ"}), 404
 
     return jsonify(job)
 
