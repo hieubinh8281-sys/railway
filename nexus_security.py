@@ -236,10 +236,16 @@ def add_license_quota(key_str, extra_quota=10):
         return True, k.get("quota_limit", 50)
     return False, "Không tìm thấy key"
 
-def consume_license_quota(key_str, amount=1):
+def consume_license_quota(key_str, amount=1, device_id=None):
     db = load_license_db()
     if key_str in db["keys"]:
         k = db["keys"][key_str]
+        if key_str == "NEXUS-FREE-DEMO-2USES" and device_id:
+            dev_map = k.setdefault("device_usage", {})
+            d_used = dev_map.get(device_id, 0)
+            dev_map[device_id] = d_used + amount
+            save_license_db(db)
+            return True, dev_map[device_id]
         limit = k.get("quota_limit", 50)
         used = k.get("quota_used", 0)
         if limit != -1 and used >= limit:
@@ -323,6 +329,14 @@ def validate_license(key_str, device_id, client_ip="127.0.0.1", user_agent=""):
         pass
 
     # KHÓA CHẶT THIẾT BỊ (DEVICE LOCKING)
+    if key_str == "NEXUS-FREE-DEMO-2USES":
+        dev_map = record.setdefault("device_usage", {})
+        used = dev_map.get(device_id, 0)
+        if used >= 2:
+            return False, "Thiết bị này đã sử dụng hết 2 lượt dùng thử miễn phí! Vui lòng liên hệ Admin để nhận Key chính thức.", None
+        token = create_session_token(key_str, device_id, user_agent)
+        return True, "Kích hoạt bản dùng thử miễn phí thành công (2 lượt CPU)!", token
+
     bound_id = record.get("bound_device_id")
     if not bound_id:
         record["bound_device_id"] = device_id
