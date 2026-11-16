@@ -388,6 +388,7 @@ def build_filter_complex_with_logo(
         bh = 0 if by >= vid_h - 4 else min(bh, (vid_h - by) // 2 * 2)
 
     blur_color_clean = (blur_color or "000000").lstrip("#")
+    escaped_ass = (ass_filename or "sub_vi.ass").replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
     if bw >= 8 and bh >= 8:
         b_steps = [f"crop={bw}:{bh}:{bx}:{by}"]
@@ -398,10 +399,10 @@ def build_filter_complex_with_logo(
         base_chain = (
             f"[0:v]split=2[main][cs];"
             f"[cs]{','.join(b_steps)}[bl];"
-            f"[main][bl]overlay={bx}:{by}:shortest=1,ass={ass_filename}[v_sub]"
+            f"[main][bl]overlay={bx}:{by}:shortest=1,ass=\\'{escaped_ass}\\'[v_sub]"
         )
     else:
-        base_chain = f"[0:v]ass={ass_filename}[v_sub]"
+        base_chain = f"[0:v]ass=\\'{escaped_ass}\\'[v_sub]"
 
     use_logo = bool(cfg.get("logo_enabled") and logo_path and os.path.exists(logo_path))
     if not use_logo:
