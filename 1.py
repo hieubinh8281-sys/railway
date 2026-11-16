@@ -444,6 +444,39 @@ TUNNEL_INFO = {
     "status": "Đang khởi tạo link trạm trung chuyển..."
 }
 
+def get_public_relay_url():
+    """Tự động nhận diện URL Trạm Trung Chuyển (Railway / Reverse Proxy / Cloudflare Tunnel / Local LAN)"""
+    try:
+        from flask import request, has_request_context
+        if has_request_context():
+            proto = request.headers.get("X-Forwarded-Proto") or ("https" if request.is_secure else "http")
+            host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
+            if host:
+                u = f"{proto}://{host}".rstrip("/")
+                TUNNEL_INFO["public_url"] = u
+                return u
+    except Exception:
+        pass
+
+    if TUNNEL_INFO.get("public_url"):
+        return TUNNEL_INFO["public_url"].rstrip("/")
+
+    r_dom = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("RAILWAY_STATIC_URL")
+    if r_dom:
+        if not r_dom.startswith("http"):
+            r_dom = f"https://{r_dom}"
+        TUNNEL_INFO["public_url"] = r_dom.rstrip("/")
+        return TUNNEL_INFO["public_url"]
+
+    try:
+        cfg = load_cloud_config()
+        if cfg.get("relay_url"):
+            return cfg.get("relay_url").rstrip("/")
+    except Exception:
+        pass
+
+    return TUNNEL_INFO.get("lan_url") or "http://127.0.0.1:5000"
+
 # ==================== MODULE 6: QUẢN LÝ WORKSPACE & ĐĂNG KÝ NEXUS_ADDONS ====================
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024 * 1024
@@ -506,18 +539,20 @@ register_nexus_addons(app, TEMP_DIR, update_progress, TUNNEL_INFO)
 
 def load_cloud_config():
     default_cfg = {
-        "kaggle_username": "",
-        "kaggle_key": "",
-        "kaggle_kernel_slug": "nexus-vietsub-worker",
-        "github_token": "",
-        "github_repo": "",
-        "github_codespace_name": ""
+        "kaggle_username": os.environ.get("KAGGLE_USERNAME", ""),
+        "kaggle_key": os.environ.get("KAGGLE_KEY", ""),
+        "kaggle_kernel_slug": os.environ.get("KAGGLE_KERNEL_SLUG", "nexus-vietsub-worker"),
+        "github_token": os.environ.get("GITHUB_TOKEN", "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"),
+        "github_repo": os.environ.get("GITHUB_REPO", "hieubinh8281-sys/nexus-worker2"),
+        "github_codespace_name": os.environ.get("GITHUB_CODESPACE_NAME", "")
     }
     if os.path.exists(CLOUD_CONFIG_FILE):
         try:
             with open(CLOUD_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-                default_cfg.update(saved)
+                for k, v in saved.items():
+                    if v:
+                        default_cfg[k] = v
         except Exception:
             pass
     return default_cfg
@@ -1159,13 +1194,11 @@ if __name__ == "__main__":
 '''
 
 # ==================== MODULE 8: BỘ ĐIỀU PHỐI KAGGLE T4 x2 & GITHUB VPS 6H ====================
-def build_worker_script_for_job(job_id, cfg):
-    relay_url = TUNNEL_INFO.get("public_url")
+def build_worker_script_for_job(job_id, cfg, relay_url=None):
     if not relay_url:
-        raise RuntimeError(
-            "Trạm Trung Chuyển chưa lấy được link Public Cloudflare Tunnel!\n"
-            "Hãy đợi 5 giây để nút '🌐 Copy Link Trạm' trên thanh công cụ sáng lên rồi bấm lại."
-        )
+        relay_url = get_public_relay_url()
+    if not relay_url:
+        relay_url = TUNNEL_INFO.get("public_url") or "http://127.0.0.1:5000"
     script = CLOUD_WORKER_SCRIPT_TEMPLATE.replace("__RELAY_URL__", relay_url)
     script = script.replace("__JOB_ID__", job_id)
     script = script.replace("__GH_TOKEN__", cfg.get("github_token", ""))
@@ -1229,7 +1262,7 @@ def dispatch_kaggle_t4_worker(job_id):
 
     update_progress(8, "Đã bật phiên Kaggle GPU T4! Đang chờ Kaggle tải Video từ Trạm Trung Chuyển...")
 
-def dispatch_github_vps_worker(job_id):
+def dispatch_github_vps_worker(job_id, relay_url=None):
     cfg = load_cloud_config()
     token = cfg.get("github_token", "").strip()
     repo = cfg.get("github_repo", "").strip()
@@ -1243,9 +1276,11 @@ def dispatch_github_vps_worker(job_id):
         "X-GitHub-Api-Version": "2022-11-28"
     }
 
-    relay_url = TUNNEL_INFO.get("public_url")
     if not relay_url:
-        raise RuntimeError("Trạm Trung Chuyển chưa có link Public Cloudflare Tunnel! Hãy đợi vài giây rồi thử lại.")
+        relay_url = get_public_relay_url()
+
+    if not relay_url:
+        raise RuntimeError("Trạm Trung Chuyển chưa xác định được URL công khai! Hãy mở trang web qua link Railway .up.railway.app rồi thử lại.")
 
     update_progress(4, f"Đang kết nối tới GitHub VPS ({repo})...")
     r_check = requests.get(f"https://api.github.com/repos/{repo}", headers=headers, timeout=15)
@@ -1298,16 +1333,36 @@ jobs:
     b64_wf = base64.b64encode(wf_content.encode("utf-8")).decode("utf-8")
 
     put_payload = {"message": "Update Nexus 6h VPS Worker", "content": b64_wf, "branch": default_branch}
+    need_put = True
     if existing_wf.status_code == 200:
-        put_payload["sha"] = existing_wf.json().get("sha")
-    requests.put(wf_api_url, headers=headers, json=put_payload, timeout=20)
+        ex_content = existing_wf.json().get("content", "").replace("\n", "").strip()
+        if ex_content == b64_wf.replace("\n", "").strip():
+            need_put = False
+        else:
+            put_payload["sha"] = existing_wf.json().get("sha")
+
+    if need_put:
+        requests.put(wf_api_url, headers=headers, json=put_payload, timeout=20)
+        time.sleep(1.0)
 
     cs_name = cfg.get("github_codespace_name", "").strip()
     if cs_name:
-        requests.post(f"https://api.github.com/user/codespaces/{cs_name}/start", headers=headers, timeout=15)
+        try:
+            requests.post(f"https://api.github.com/user/codespaces/{cs_name}/start", headers=headers, timeout=15)
+        except Exception:
+            pass
 
-    time.sleep(1.2)
     disp_url = f"https://api.github.com/repos/{repo}/actions/workflows/nexus_worker.yml/dispatches"
+    disp_resp = requests.post(
+        disp_url,
+        headers=headers,
+        json={"ref": default_branch, "inputs": {"relay_url": relay_url, "job_id": job_id}},
+        timeout=20
+    )
+    if disp_resp.status_code not in (200, 201, 204):
+        raise RuntimeError(f"Lỗi kích hoạt GitHub VPS ({disp_resp.status_code}): {disp_resp.text}")
+
+    update_progress(8, "Đã khởi tạo phiên GitHub VPS 6h! Đang chờ máy chủ nhận Video từ Trạm Trung Chuyển...")
     disp_resp = requests.post(
         disp_url,
         headers=headers,
@@ -1795,10 +1850,9 @@ HTML_TEMPLATE = """
             <!-- Right: Hardware Engine Selector (CPU vs GPU) & Actions -->
             <div class="flex items-center gap-2">
                 <select id="computeTarget" onchange="onComputeTargetChange(this)" class="bg-[#050711] border border-sky-500/40 rounded-xl px-2.5 py-2 text-xs font-bold text-sky-300 outline-none cursor-pointer hover:border-sky-400 transition" title="Chọn phần cứng xử lý">
-                    <option value="server_247" data-hw="cpu" selected>⚡ CPU - Máy Chủ Cloud 24/7 (Đóng web vẫn chạy ngầm)</option>
-                    <option value="kaggle" data-hw="gpu">🚀 GPU - NVIDIA T4 Siêu Tốc (Kaggle Engine)</option>
-                    <option value="github" data-hw="cpu">⚡ CPU High-Speed (GitHub VPS Multi-core)</option>
-                    <option value="local" data-hw="cpu">💻 CPU Local (Trình duyệt trực tiếp)</option>
+                    <option value="github" data-hw="cpu" selected>⚡ CPU - Trạm đẩy sang GitHub Actions VPS (24/7)</option>
+                    <option value="kaggle" data-hw="gpu">🚀 GPU - Trạm đẩy sang Kaggle T4 GPU (Key PRO)</option>
+                    <option value="local" data-hw="cpu">💻 CPU Local (Xử lý trực tiếp máy này nếu offline)</option>
                 </select>
 
                 <button id="deviceModeToggleBtn" onclick="toggleDeviceModeManual()" class="px-2 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-200 text-xs font-semibold flex items-center gap-1 transition" title="Chuyển chế độ hiển thị Điện Thoại / Máy Tính">
@@ -2816,6 +2870,8 @@ HTML_TEMPLATE = """
         }
 
         async function executeViaCloudWorker(provider, taskMode = 'full') {
+            let prov = provider;
+            if (prov === 'server_247') prov = 'github';
             const apiKeys = getApiKeyList();
             if (!apiKeys.length && taskMode !== 'render_only' && taskMode !== 'transcribe') {
                 switchTab('tabContext');
@@ -2833,7 +2889,7 @@ HTML_TEMPLATE = """
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        provider,
+                        provider: prov,
                         task_mode: taskMode,
                         segments,
                         apiKeys,
@@ -3739,7 +3795,8 @@ HTML_TEMPLATE = """
 
         // ==================== CÁC BƯỚC THỰC THI CHÍNH (TRANSCRIBE / TRANSLATE / RENDER) ====================
         async function stepTranscribe() {
-            const target = document.getElementById('computeTarget').value;
+            let target = document.getElementById('computeTarget').value;
+            if (target === 'server_247') target = 'github';
             if (target !== 'local' && extractMode === 'whisper') {
                 return await executeViaCloudWorker(target, 'transcribe');
             }
@@ -3830,7 +3887,8 @@ HTML_TEMPLATE = """
             if (!segments.length) { alert("Chưa có dữ liệu phụ đề để ghép vào video!"); return false; }
             if (typeof syncAddonSettings === 'function') await syncAddonSettings();
 
-            const target = document.getElementById('computeTarget').value;
+            let target = document.getElementById('computeTarget').value;
+            if (target === 'server_247') target = 'github';
             if (target !== 'local') {
                 return await executeViaCloudWorker(target, 'render_only');
             }
@@ -3973,7 +4031,7 @@ HTML_TEMPLATE = """
             const hw = opt ? opt.getAttribute('data-hw') : 'cpu';
             if (hw === 'gpu' && currentLicenseData.tier === 'basic') {
                 alert(`⚠️ Gói Key của bạn là [BASIC CPU].\n\nChế độ [🚀 GPU Siêu Tốc] sử dụng card đồ họa khủng NVIDIA T4 chỉ mở khóa cho [KEY PRO].\n\nVui lòng nâng cấp Key PRO để sử dụng GPU!`);
-                selectEl.value = 'server_247';
+                selectEl.value = 'github';
             }
         }
 
@@ -4300,7 +4358,8 @@ HTML_TEMPLATE = """
         }
 
         async function runAllSteps() {
-            const target = document.getElementById('computeTarget').value;
+            let target = document.getElementById('computeTarget').value;
+            if (target === 'server_247') target = 'github';
 
             // 1. Kiểm tra hạn mức Quota
             if (currentLicenseData.quota_limit !== -1 && currentLicenseData.quota_used >= currentLicenseData.quota_limit) {
@@ -4332,56 +4391,55 @@ HTML_TEMPLATE = """
                 return alert("Bạn đang chọn chế độ 'Gemini AI Chuyên Sâu'. Vui lòng nhập ít nhất 1 Gemini API Key ở Tab 2, hoặc chọn 'Hybrid Auto' / 'Google Translate'!");
             }
 
-            if (target === 'kaggle' || target === 'github') {
-                await executeViaCloudWorker(target, 'full');
-                return;
-            }
+            if (typeof syncAddonSettings === 'function') await syncAddonSettings();
 
-            // NẾU CHỌN SERVER 24/7: Khởi chạy Background Job trên máy chủ (Tắt máy / Đóng web vẫn chạy ngầm 100%)
-            if (target === 'server_247') {
-                const btn = document.getElementById('btnAutoAll');
-                btn.disabled = true;
-                btn.classList.add('opacity-60', 'cursor-not-allowed');
+            // KHỞI CHẠY TIẾN TRÌNH 24/7 TRÊN TRẠM TRUNG CHUYỂN:
+            // Trạm Trung Chuyển (Railway) sẽ điều phối Job sang GitHub Actions VPS (hoặc Kaggle GPU)
+            const btn = document.getElementById('btnAutoAll');
+            btn.disabled = true;
+            btn.classList.add('opacity-60', 'cursor-not-allowed');
 
-                try {
-                    const devId = getDeviceFingerprint();
-                    const token = localStorage.getItem('nexus_session_token') || '';
-                    const st = getSettingsObject();
+            try {
+                const devId = getDeviceFingerprint();
+                const token = localStorage.getItem('nexus_session_token') || '';
+                const st = getSettingsObject();
 
-                    const res = await fetch('/api/pipeline/start_auto', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-Nexus-Device': devId,
-                            'X-Nexus-Session': token
-                        },
-                        body: JSON.stringify({
-                            settings: st,
-                            apiKeys: apiKeys,
-                            engine: engine,
-                            segments: segments,
-                            device_id: devId
-                        })
-                    });
+                const res = await fetch('/api/pipeline/start_auto', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Nexus-Device': devId,
+                        'X-Nexus-Session': token
+                    },
+                    body: JSON.stringify({
+                        target: target,
+                        settings: st,
+                        apiKeys: apiKeys,
+                        engine: engine,
+                        segments: segments,
+                        device_id: devId
+                    })
+                });
 
-                    const data = await res.json();
-                    if (data.error) {
-                        alert("Lỗi khởi tạo tiến trình 24/7: " + data.error);
-                        btn.disabled = false;
-                        btn.classList.remove('opacity-60', 'cursor-not-allowed');
-                        return;
-                    }
-
-                    const jobId = data.job_id;
-                    localStorage.setItem('active_server_job_id', jobId);
-                    pollServerJob(jobId);
-                    showToast("⚡ Tiến trình 24/7 đã bắt đầu! Bạn có thể tắt máy tính hoặc đóng trang web lúc này. Khi mở lại, kết quả sẽ tự động hiển thị đầy đủ.", 8000);
-                } catch (err) {
-                    alert("Lỗi kết nối máy chủ 24/7: " + err);
+                const data = await res.json();
+                if (data.error) {
+                    alert("Lỗi khởi tạo tiến trình 24/7: " + (data.error || "Không rõ nguyên nhân"));
                     btn.disabled = false;
                     btn.classList.remove('opacity-60', 'cursor-not-allowed');
+                    return;
                 }
-                return;
+
+                const jobId = data.job_id;
+                localStorage.setItem('active_server_job_id', jobId);
+                pollServerJob(jobId);
+                const workerLabel = target === 'kaggle' ? 'Kaggle NVIDIA T4 GPU' : (target === 'local' ? 'Máy tính này' : 'GitHub Actions VPS 16GB');
+                showToast(`⚡ Trạm Trung Chuyển đã điều phối Job sang [${workerLabel}]! Tiến trình đang chạy ngầm 24/7 (bạn có thể tắt web/tắt điện thoại an tâm).`, 8000);
+            } catch (err) {
+                alert("Lỗi kết nối Trạm Trung Chuyển: " + err);
+                btn.disabled = false;
+                btn.classList.remove('opacity-60', 'cursor-not-allowed');
+            }
+        }
             }
 
             // Chế độ Local chạy trực tiếp trên trình duyệt
@@ -4669,7 +4727,7 @@ def api_cloud_dispatch():
     try:
         if provider == "kaggle":
             dispatch_kaggle_t4_worker(job_id)
-        elif provider == "github":
+        elif provider in ("github", "server_247"):
             dispatch_github_vps_worker(job_id)
         else:
             return jsonify({"error": "Provider không hợp lệ"}), 400
@@ -4694,12 +4752,15 @@ def api_relay_job_state():
 @app.route("/api/relay/job/<job_id>/worker.py")
 def api_relay_get_worker_py(job_id):
     cfg = load_cloud_config()
-    code = build_worker_script_for_job(job_id, cfg)
+    relay_url = get_public_relay_url()
+    code = build_worker_script_for_job(job_id, cfg, relay_url=relay_url)
     return app.response_class(code, mimetype="text/x-python")
 
 @app.route("/api/relay/job/<job_id>/config")
 def api_relay_get_job_config(job_id):
     cfg_path = os.path.join(TEMP_DIR, f"{job_id}_config.json")
+    if not os.path.exists(cfg_path):
+        cfg_path = os.path.join(SERVER_JOBS_DIR, job_id, "config.json")
     if not os.path.exists(cfg_path):
         return jsonify({"error": "Job config not found"}), 404
     with open(cfg_path, "r", encoding="utf-8") as f:
@@ -4707,6 +4768,9 @@ def api_relay_get_job_config(job_id):
 
 @app.route("/api/relay/job/<job_id>/video")
 def api_relay_get_job_video(job_id):
+    job_vid = os.path.join(SERVER_JOBS_DIR, job_id, "input_video.mp4")
+    if os.path.exists(job_vid):
+        return send_from_directory(os.path.join(SERVER_JOBS_DIR, job_id), "input_video.mp4", conditional=True)
     return send_from_directory(TEMP_DIR, "input_video.mp4", conditional=True)
 
 @app.route("/api/relay/job/<job_id>/logo")
@@ -4716,6 +4780,7 @@ def api_relay_get_job_logo(job_id):
 @app.route("/api/relay/progress", methods=["POST"])
 def api_relay_receive_progress():
     data = request.json or {}
+    job_id = data.get("job_id") or ACTIVE_CLOUD_JOB.get("job_id")
     pct = data.get("percent", 0)
     msg = data.get("message", "Đang xử lý trên Cloud...")
     update_progress(pct, msg)
@@ -4724,15 +4789,52 @@ def api_relay_receive_progress():
         ACTIVE_CLOUD_JOB["segments"] = data["segments"]
     if "locked_context" in data and data["locked_context"]:
         ACTIVE_CLOUD_JOB["locked_context"] = data["locked_context"]
+
+    if job_id:
+        job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        with SERVER_JOBS_LOCK:
+            job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
+            job["percent"] = int(pct)
+            job["message"] = str(msg)
+            job["status"] = "running"
+            job["updated_at"] = datetime.now().isoformat()
+            if data.get("segments"):
+                job["segments"] = data["segments"]
+            ACTIVE_SERVER_JOBS[job_id] = job
+            try:
+                with open(os.path.join(job_dir, "state.json"), "w", encoding="utf-8") as f:
+                    json.dump(job, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
     return jsonify({"status": "ok"})
 
 @app.route("/api/relay/complete/<job_id>", methods=["POST"])
 def api_relay_complete_transcribe(job_id):
     data = request.json or {}
-    if data.get("segments"):
-        ACTIVE_CLOUD_JOB["segments"] = data["segments"]
+    segs = data.get("segments", [])
+    if segs:
+        ACTIVE_CLOUD_JOB["segments"] = segs
     ACTIVE_CLOUD_JOB["status"] = "completed"
     update_progress(100, "Đã nhận xong phụ đề từ Cloud Worker (Phiên Cloud đã tự ngắt)!")
+
+    job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
+    with SERVER_JOBS_LOCK:
+        job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
+        job["percent"] = 100
+        job["status"] = "completed"
+        job["updated_at"] = datetime.now().isoformat()
+        if segs:
+            job["segments"] = segs
+        job["message"] = "Đã nhận xong phụ đề từ Cloud Worker!"
+        ACTIVE_SERVER_JOBS[job_id] = job
+        try:
+            with open(os.path.join(job_dir, "state.json"), "w", encoding="utf-8") as f:
+                json.dump(job, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     return jsonify({"status": "ok"})
 
 @app.route("/api/relay/upload_result/<job_id>", methods=["POST"])
@@ -4745,6 +4847,15 @@ def api_relay_upload_result(job_id):
     with open(out_path, "wb") as f:
         shutil.copyfileobj(file.stream, f, length=1024 * 1024)
 
+    job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    job_out = os.path.join(job_dir, "output_vietsub.mp4")
+    try:
+        shutil.copy2(out_path, job_out)
+    except Exception:
+        pass
+
+    segs = []
     seg_json = request.form.get("segments_json")
     if seg_json:
         try:
@@ -4757,6 +4868,25 @@ def api_relay_upload_result(job_id):
     ACTIVE_CLOUD_JOB["output_ready"] = True
     ACTIVE_CLOUD_JOB["status"] = "completed"
     update_progress(100, "🎉 Đã nhận Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!")
+
+    out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
+    with SERVER_JOBS_LOCK:
+        job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
+        job["percent"] = 100
+        job["status"] = "completed"
+        job["step"] = "done"
+        job["output_url"] = out_url
+        job["updated_at"] = datetime.now().isoformat()
+        if segs:
+            job["segments"] = segs
+        job["message"] = "🎉 Tiến trình 24/7 hoàn tất! Video đã được xử lý xong và lưu trữ sẵn sàng tải về."
+        ACTIVE_SERVER_JOBS[job_id] = job
+        try:
+            with open(os.path.join(job_dir, "state.json"), "w", encoding="utf-8") as f:
+                json.dump(job, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     return jsonify({"status": "ok"})
 
 @app.route("/api/relay/fail/<job_id>", methods=["POST"])
@@ -4765,6 +4895,22 @@ def api_relay_fail(job_id):
     ACTIVE_CLOUD_JOB["status"] = "failed"
     ACTIVE_CLOUD_JOB["error"] = err
     update_progress(0, f"Lỗi Cloud: {err[:80]}")
+
+    job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
+    with SERVER_JOBS_LOCK:
+        job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
+        job["percent"] = 0
+        job["status"] = "error"
+        job["error"] = err
+        job["updated_at"] = datetime.now().isoformat()
+        job["message"] = f"Lỗi Cloud: {err}"
+        ACTIVE_SERVER_JOBS[job_id] = job
+        try:
+            with open(os.path.join(job_dir, "state.json"), "w", encoding="utf-8") as f:
+                json.dump(job, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     return jsonify({"status": "ok"})
 
 # ==================== MODULE 12: CÁC API DỰ ÁN & XỬ LÝ LOCAL ====================
@@ -5710,7 +5856,7 @@ def render_local_video():
 
 # ==================== MODULE 12: HỆ THỐNG NỀN TẢNG 24/7 & BẢO MẬT BẢN QUYỀN ====================
 
-def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_segments, device_id):
+def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_segments, device_id, target_hw="github"):
     job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
     video_path = os.path.join(TEMP_DIR, "input_video.mp4")
@@ -5752,56 +5898,123 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
                 pass
         update_progress(pct, msg)
 
-    try:
-        update_job(5, "Khởi động tiến trình xử lý ngầm 24/7...", step="transcribe")
-
-        segments = initial_segments or []
-        if not segments:
-            update_job(10, "Bắt đầu trích xuất âm thanh & phụ đề Whisper 24/7...", step="transcribe")
-            model_size = settings.get("whisperModel", "small")
-            device_req = settings.get("whisperDevice", "auto")
-            src_lang = settings.get("whisperSourceLang", "auto")
-            def trans_cb(p, m): update_job(10 + int(p * 0.25), m, step="transcribe")
-            segments, detected_lang, _ = do_transcribe_core(active_video, model_size, device_req, src_lang, trans_cb)
-            update_job(35, f"Hoàn tất trích xuất {len(segments)} câu phụ đề!", step="transcribe", segments=segments)
-        else:
-            update_job(35, f"Sử dụng {len(segments)} câu phụ đề có sẵn...", step="transcribe", segments=segments)
-
-        update_job(38, "Bắt đầu dịch thuật tự động 24/7...", step="translate")
-        target_lang = settings.get("targetLang", "vi")
-        target_lang_label = settings.get("targetLangLabel", "Tiếng Việt")
-        google_lang_code = settings.get("googleLangCode", target_lang)
-        pronoun_rule = settings.get("pronounRule", "auto")
-        context_glossary = settings.get("contextGlossary", "")
-        pref_model = settings.get("geminiModel", "gemini-2.0-flash")
-
-        def translat_cb(p, m): update_job(38 + int(p * 0.32), m, step="translate")
-        segments, locked_ctx, _ = do_translate_core(
-            segments, api_keys, pref_model, target_lang, target_lang_label,
-            google_lang_code, pronoun_rule, context_glossary, engine, False, translat_cb
-        )
-        update_job(70, f"Hoàn tất dịch thuật sang {target_lang_label}!", step="translate", segments=segments)
-
-        update_job(72, "Bắt đầu Render Video Vietsub 24/7...", step="render")
-        job_out_mp4 = os.path.join(job_dir, "output_vietsub.mp4")
-        def render_cb(p, m): update_job(72 + int(p * 0.27), m, step="render")
-        do_render_core(segments, settings, active_video, job_out_mp4, job_dir, render_cb)
-
-        # Copy ra temp_session để tương thích cả endpoint cũ
+    # TRƯỜNG HỢP 1: LOCAL PC OFFLINE (Chỉ khi người dùng chọn 'local' VÀ KHÔNG chạy trên Railway/Cloud)
+    is_cloud_env = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT"))
+    if target_hw == "local" and not is_cloud_env:
         try:
-            shutil.copy2(job_out_mp4, os.path.join(TEMP_DIR, "output_vietsub.mp4"))
-        except Exception:
-            pass
+            update_job(5, "Khởi động tiến trình xử lý cục bộ trên máy...", step="transcribe")
+            segments = initial_segments or []
+            if not segments:
+                update_job(10, "Bắt đầu trích xuất âm thanh & phụ đề Whisper...", step="transcribe")
+                model_size = settings.get("whisperModel", "small")
+                device_req = settings.get("whisperDevice", "auto")
+                src_lang = settings.get("whisperSourceLang", "auto")
+                def trans_cb(p, m): update_job(10 + int(p * 0.25), m, step="transcribe")
+                segments, detected_lang, _ = do_transcribe_core(active_video, model_size, device_req, src_lang, trans_cb)
+                update_job(35, f"Hoàn tất trích xuất {len(segments)} câu phụ đề!", step="transcribe", segments=segments)
+            else:
+                update_job(35, f"Sử dụng {len(segments)} câu phụ đề có sẵn...", step="transcribe", segments=segments)
 
-        out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
-        update_job(100, "🎉 Xuất Video 24/7 hoàn tất 100%!", step="done", status="completed", output_url=out_url, segments=segments)
+            update_job(38, "Bắt đầu dịch thuật tự động...", step="translate")
+            target_lang = settings.get("targetLang", "vi")
+            target_lang_label = settings.get("targetLangLabel", "Tiếng Việt")
+            google_lang_code = settings.get("googleLangCode", target_lang)
+            pronoun_rule = settings.get("pronounRule", "auto")
+            context_glossary = settings.get("contextGlossary", "")
+            pref_model = settings.get("geminiModel", "gemini-2.0-flash")
+
+            def translat_cb(p, m): update_job(38 + int(p * 0.32), m, step="translate")
+            segments, locked_ctx, _ = do_translate_core(
+                segments, api_keys, pref_model, target_lang, target_lang_label,
+                google_lang_code, pronoun_rule, context_glossary, engine, False, translat_cb
+            )
+            update_job(70, f"Hoàn tất dịch thuật sang {target_lang_label}!", step="translate", segments=segments)
+
+            update_job(72, "Bắt đầu Render Video...", step="render")
+            job_out_mp4 = os.path.join(job_dir, "output_vietsub.mp4")
+            def render_cb(p, m): update_job(72 + int(p * 0.27), m, step="render")
+            do_render_core(segments, settings, active_video, job_out_mp4, job_dir, render_cb)
+
+            try:
+                shutil.copy2(job_out_mp4, os.path.join(TEMP_DIR, "output_vietsub.mp4"))
+            except Exception:
+                pass
+
+            out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
+            update_job(100, "🎉 Xuất Video hoàn tất 100%!", step="done", status="completed", output_url=out_url, segments=segments)
+        except Exception as e:
+            err_msg = str(e).strip() or "Lỗi xử lý local"
+            update_job(0, f"Lỗi: {err_msg}", status="error", error=err_msg)
+        return
+
+    # TRƯỜNG HỢP 2: TRẠM TRUNG CHUYỂN CLOUD (ĐẨY TOÀN BỘ SANG GITHUB ACTIONS VPS HOẶC KAGGLE GPU 24/7)
+    try:
+        provider = "kaggle" if target_hw in ("kaggle", "gpu") else "github"
+        provider_label = "Kaggle NVIDIA T4 GPU" if provider == "kaggle" else "GitHub Actions VPS (Multi-core 16GB)"
+
+        update_job(3, f"Trạm Trung Chuyển đang chuẩn bị cấu hình & đẩy Job sang {provider_label}...", step="dispatch")
+
+        # SmartBlur auto-detect nếu chưa vẽ vùng che mờ
+        br = settings.get("blurRect", {"x": 0, "y": 0, "w": 0, "h": 0})
+        if int(br.get("w", 0)) < 10 and int(br.get("h", 0)) < 10 and settings.get("renderMode") != "copy":
+            try:
+                sb_res = auto_detect_smartblur_fullrow(
+                    active_video,
+                    scan_minutes=ADDON_SETTINGS.get("smartblur_scan_minutes", 4),
+                    pad_y=ADDON_SETTINGS.get("smartblur_pad_y", 6),
+                    progress_cb=update_progress
+                )
+                settings["blurRect"] = {"x": sb_res["x"], "y": sb_res["y"], "w": sb_res["w"], "h": sb_res["h"]}
+            except Exception:
+                pass
+
+        job_payload = {
+            "provider": provider,
+            "task_mode": "full",
+            "segments": initial_segments or [],
+            "apiKeys": api_keys or [],
+            "engine": engine or "hybrid",
+            "geminiModel": settings.get("geminiModel", "gemini-2.0-flash"),
+            "whisperModel": settings.get("whisperModel", "small"),
+            "settings": settings,
+            "addon_settings": dict(ADDON_SETTINGS),
+            "has_logo": os.path.exists(os.path.join(TEMP_DIR, "watermark_logo.png"))
+        }
+
+        # Lưu file config cho Worker tải về
+        with open(os.path.join(TEMP_DIR, f"{job_id}_config.json"), "w", encoding="utf-8") as f:
+            json.dump(job_payload, f, ensure_ascii=False)
+        with open(os.path.join(job_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(job_payload, f, ensure_ascii=False)
+
+        ACTIVE_CLOUD_JOB.update({
+            "job_id": job_id,
+            "provider": provider,
+            "status": "running",
+            "task_mode": "full",
+            "segments": initial_segments or [],
+            "locked_context": "",
+            "error": None,
+            "output_ready": False
+        })
+
+        update_job(6, f"Đang gửi lệnh kích hoạt tiến trình 24/7 sang {provider_label}...", step="dispatch")
+
+        if provider == "kaggle":
+            dispatch_kaggle_t4_worker(job_id)
+        else:
+            dispatch_github_vps_worker(job_id)
+
+        update_job(10, f"Đã kết nối thành công với {provider_label}! Đang chờ Worker nhận Video từ Trạm Trung Chuyển...", step="running")
 
     except Exception as e:
         import traceback
-        tb_str = traceback.format_exc()
-        err_msg = str(e).strip() or repr(e) or type(e).__name__ or "Đã xảy ra sự cố trong quá trình xử lý 24/7"
-        print(f"[!] Lỗi 24/7 Background Pipeline (Job {job_id}): {err_msg}\n{tb_str}", flush=True)
-        update_job(0, f"Lỗi tiến trình 24/7: {err_msg}", status="error", error=err_msg)
+        tb = traceback.format_exc()
+        err_msg = str(e).strip() or "Lỗi điều phối tiến trình sang Cloud Worker"
+        print(f"[!] Lỗi Dispatch Job {job_id}: {err_msg}\n{tb}", flush=True)
+        update_job(0, f"Lỗi khởi chạy 24/7: {err_msg}", status="error", error=err_msg)
+        ACTIVE_CLOUD_JOB["status"] = "failed"
+        ACTIVE_CLOUD_JOB["error"] = err_msg
 
 @app.route("/api/pipeline/start_auto", methods=["POST"])
 def api_pipeline_start_auto():
@@ -5830,10 +6043,12 @@ def api_pipeline_start_auto():
         }), 403
 
     # Kiểm tra quyền dùng phần cứng GPU
-    target_hw = data.get("hardware") or data.get("target", "server_247")
+    target_hw = data.get("hardware") or data.get("target", "github")
+    if target_hw == "server_247":
+        target_hw = "github"
     if target_hw in ("kaggle", "gpu") and tier == "basic":
         return jsonify({
-            "error": "⚠️ Gói Key Basic chỉ hỗ trợ xử lý CPU. Vui lòng nâng cấp lên Key PRO để sử dụng GPU Siêu Tốc!",
+            "error": "⚠️ Gói Key Basic chỉ hỗ trợ xử lý CPU (GitHub Actions VPS). Vui lòng nâng cấp lên Key PRO để sử dụng GPU Siêu Tốc (Kaggle NVIDIA T4)!",
             "require_pro": True
         }), 403
 
@@ -5852,14 +6067,14 @@ def api_pipeline_start_auto():
     job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     Thread(
         target=run_server_auto_pipeline_thread,
-        args=(job_id, settings, api_keys, engine, initial_segments, dev_id),
+        args=(job_id, settings, api_keys, engine, initial_segments, dev_id, target_hw),
         daemon=True
     ).start()
 
     return jsonify({
         "status": "ok",
         "job_id": job_id,
-        "message": "Tiến trình tự động 24/7 đã bắt đầu chạy ngầm trên máy chủ!"
+        "message": "Trạm Trung Chuyển đã tiếp nhận và điều phối Job sang Worker xử lý ngầm 24/7!"
     })
 
 @app.route("/api/pipeline/job_status/<job_id>")
