@@ -1,0 +1,35 @@
+{
+  "admin_pwd_hash": "5f762f5fa2fada5ea58c9020f83c47a9770c2064acac427ff5d19edcd0d74d9e",
+  "keys": {
+    "NEXUS-FREE-DEMO-2USES": {
+      "key": "NEXUS-FREE-DEMO-2USES",
+      "customer": "Bản Dùng Thử Miễn Phí (2 Lượt CPU)",
+      "duration_days": 7,
+      "created_at": "2026-11-15T20:30:00.000000",
+      "expires_at": "2026-12-15T20:30:00.000000",
+      "status": "active",
+      "bound_device_id": "DEV-288C-38CB-LRBQ",
+      "bound_ip": "127.0.0.1",
+      "bound_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
+      "last_active": "2026-11-15T21:04:42.430112",
+      "tier": "basic",
+      "quota_limit": 2,
+      "quota_used": 0
+    },
+    "NEXUS-VIP-PRO-DEMO": {
+      "key": "NEXUS-VIP-PRO-DEMO",
+      "customer": "Bản VIP Quản Trị (PRO GPU)",
+      "duration_days": 30,
+      "created_at": "2026-11-15T20:30:00.000000",
+      "expires_at": "2026-12-15T20:30:00.000000",
+      "status": "active",
+      "bound_device_id": null,
+      "bound_ip": null,
+      "bound_user_agent": null,
+      "last_active": null,
+      "tier": "pro",
+      "quota_limit": 100,
+      "quota_used": 0
+    }
+  }
+}

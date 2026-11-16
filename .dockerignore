@@ -1,0 +1,6 @@
+temp_session/
+projects/
+kaggle_worker_build/
+__pycache__/
+*.pyc
+.git/
