@@ -1571,6 +1571,53 @@ HTML_TEMPLATE = """
         ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #334155; }
         video::cue { background: rgba(0,0,0,0.7); color: #e1ff00; font-weight: bold; }
+
+        /* ================= MOBILE RESPONSIVE OVERRIDES ================= */
+        body.is-mobile {
+            overflow-y: auto !important;
+            height: auto !important;
+            min-height: 100vh;
+        }
+        body.is-mobile #viewMainStudio {
+            height: auto !important;
+            min-height: 100vh;
+            overflow-y: visible !important;
+            padding-bottom: 70px; /* Chừa khoảng trống cho Bottom Action Bar trên Mobile */
+        }
+        body.is-mobile main {
+            overflow: visible !important;
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 12px !important;
+            padding: 8px !important;
+        }
+        body.is-mobile aside {
+            height: auto !important;
+            max-height: none !important;
+            overflow: visible !important;
+        }
+        body.is-mobile aside > div:nth-child(2) {
+            max-height: 520px !important;
+        }
+        body.is-mobile section {
+            overflow: visible !important;
+            display: flex !important;
+            flex-direction: column !important;
+        }
+        body.is-mobile .dual-monitors-grid {
+            height: auto !important;
+            grid-template-columns: 1fr !important;
+        }
+        body.is-mobile .monitor-box {
+            min-height: 220px !important;
+        }
+        body.is-mobile .sub-table-container {
+            max-height: 480px !important;
+            overflow-y: auto !important;
+        }
+        @media (max-width: 1024px) {
+            .mobile-hide-inline { display: none !important; }
+        }
     </style>
 </head>
 <body class="h-screen w-screen overflow-hidden text-slate-200 font-sans select-none">
@@ -1753,6 +1800,10 @@ HTML_TEMPLATE = """
                     <option value="github" data-hw="cpu">⚡ CPU High-Speed (GitHub VPS Multi-core)</option>
                     <option value="local" data-hw="cpu">💻 CPU Local (Trình duyệt trực tiếp)</option>
                 </select>
+
+                <button id="deviceModeToggleBtn" onclick="toggleDeviceModeManual()" class="px-2 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-200 text-xs font-semibold flex items-center gap-1 transition" title="Chuyển chế độ hiển thị Điện Thoại / Máy Tính">
+                    <i id="deviceModeIcon" class="fa-solid fa-mobile-screen text-sky-400"></i> <span id="deviceModeText" class="hidden sm:inline">Mobile</span>
+                </button>
 
                 <button onclick="openSettingsModal()" class="px-2.5 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition" title="Cài đặt giao diện, đổi màu & cấu hình">
                     <i class="fa-solid fa-palette text-purple-400"></i> Cài Đặt
@@ -2150,8 +2201,8 @@ HTML_TEMPLATE = """
 
         <!-- RIGHT WORKSPACE (9 COLS): DUAL MONITORS & TIMELINE -->
         <section class="col-span-12 lg:col-span-9 flex flex-col gap-3 overflow-hidden">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 h-[335px] shrink-0">
-                <div class="studio-panel rounded-2xl flex flex-col overflow-hidden">
+            <div class="dual-monitors-grid grid grid-cols-1 md:grid-cols-2 gap-3 h-[335px] shrink-0">
+                <div class="studio-panel monitor-box rounded-2xl flex flex-col overflow-hidden">
                     <div class="studio-header px-3.5 py-2 flex items-center justify-between text-xs">
                         <span class="font-bold text-slate-200 flex items-center gap-1.5">
                             <i class="fa-solid fa-vector-square text-amber-400"></i> Màn hình Gốc (Hỗ trợ SmartBlur Che Cả Hàng ở Tab 3)
@@ -2169,7 +2220,7 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <div class="studio-panel rounded-2xl flex flex-col overflow-hidden">
+                <div class="studio-panel monitor-box rounded-2xl flex flex-col overflow-hidden">
                     <div class="studio-header px-3.5 py-2 flex items-center justify-between text-xs">
                         <span class="font-bold text-slate-200 flex items-center gap-1.5">
                             <i class="fa-solid fa-circle-play text-emerald-400"></i> Màn hình Thành Phẩm (Nhận Video trả về từ Cloud)
@@ -2189,7 +2240,7 @@ HTML_TEMPLATE = """
             </div>
 
             <!-- Subtitle Timeline Table -->
-            <div class="studio-panel rounded-2xl flex-1 flex flex-col overflow-hidden">
+            <div class="studio-panel sub-table-container rounded-2xl flex-1 flex flex-col overflow-hidden">
                 <div class="studio-header px-4 py-2 flex flex-wrap items-center justify-between gap-2">
                     <div class="flex items-center gap-2">
                         <h3 class="text-xs font-extrabold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
@@ -2512,6 +2563,22 @@ HTML_TEMPLATE = """
             <div class="flex justify-end pt-2 border-t border-slate-800">
                 <button onclick="closeProjectsModal()" class="px-4 py-1.5 rounded-xl bg-slate-800 text-xs text-slate-300">Đóng</button>
             </div>
+        </div>
+    </div>
+
+    <!-- MOBILE STICKY BOTTOM ACTION BAR -->
+    <div id="mobileBottomBar" class="fixed bottom-0 inset-x-0 z-40 bg-[#070914]/95 backdrop-blur-xl border-t border-white/[0.1] px-4 py-2.5 flex items-center justify-between gap-3 shadow-2xl hidden">
+        <div class="flex items-center gap-2">
+            <span id="mobileBottomBadge" class="text-[11px] font-bold text-amber-300 mono">0/50</span>
+            <span id="mobileBottomStatus" class="text-[11px] text-slate-400 truncate max-w-[130px]">Sẵn sàng</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <button onclick="runAllSteps()" class="px-3.5 py-2 rounded-xl bg-gradient-to-r from-sky-500 via-indigo-600 to-purple-600 active:scale-95 text-white text-xs font-black shadow-lg shadow-sky-500/25 flex items-center gap-1.5">
+                <i class="fa-solid fa-bolt"></i> A → Z
+            </button>
+            <a id="mobileDownloadBtn" href="/temp_session/output_vietsub.mp4" download="output_vietsub.mp4" class="hidden px-3 py-2 rounded-xl bg-emerald-500 text-slate-950 text-xs font-black flex items-center gap-1">
+                <i class="fa-solid fa-download"></i> Tải
+            </a>
         </div>
     </div>
 
@@ -3872,12 +3939,15 @@ HTML_TEMPLATE = """
             // 2. Quota Display
             const quotaText = document.getElementById('userQuotaText');
             const miniBar = document.getElementById('quotaMiniBar');
+            const mobBadge = document.getElementById('mobileBottomBadge');
             if (quotaText) {
                 if (limit === -1) {
                     quotaText.innerText = 'Vô Hạn';
+                    if (mobBadge) mobBadge.innerText = 'Vô Hạn';
                     if (miniBar) miniBar.style.width = '100%';
                 } else {
                     quotaText.innerText = `${used} / ${limit}`;
+                    if (mobBadge) mobBadge.innerText = `${used}/${limit}`;
                     if (miniBar) {
                         const pct = Math.min(100, Math.round((used / Math.max(1, limit)) * 100));
                         miniBar.style.width = pct + '%';
@@ -4063,6 +4133,16 @@ HTML_TEMPLATE = """
 
                     setStatus(data.percent || 0, data.message || "Đang xử lý 24/7...");
 
+                    // Đảm bảo video gốc được hiển thị
+                    if (data.source_url) {
+                        const sVid = document.getElementById('sourceVideo');
+                        if (sVid && (!sVid.src || sVid.src.indexOf('blob:') === 0)) {
+                            sVid.src = data.source_url;
+                            sVid.load();
+                            videoLoaded = true;
+                        }
+                    }
+
                     if (data.segments && data.segments.length > 0 && segments.length === 0) {
                         segments = data.segments;
                         renderSubTable();
@@ -4092,6 +4172,12 @@ HTML_TEMPLATE = """
                         dlBtn.href = data.output_url;
                         dlBtn.classList.remove('hidden');
 
+                        const mobDl = document.getElementById('mobileDownloadBtn');
+                        if (mobDl) {
+                            mobDl.href = data.output_url;
+                            mobDl.classList.remove('hidden');
+                        }
+
                         const rBadge = document.getElementById('renderBadge');
                         if (rBadge) {
                             rBadge.innerText = "24/7 Hoàn Thành 100%";
@@ -4119,20 +4205,40 @@ HTML_TEMPLATE = """
             try {
                 const res = await fetch(`/api/pipeline/active_job?device_id=${devId}&job_id=${savedJobId || ''}`);
                 const data = await res.json();
+
+                // Trường hợp 1: Có Job 24/7 (Đang chạy hoặc Đã hoàn tất hoặc Báo lỗi)
                 if (data.active && data.job) {
                     const job = data.job;
                     localStorage.setItem('active_server_job_id', job.job_id);
 
+                    // Khôi phục ngay Màn hình Video Gốc
+                    if (job.source_url) {
+                        const sVid = document.getElementById('sourceVideo');
+                        if (sVid && (!sVid.src || sVid.src.indexOf('blob:') === 0 || sVid.src.indexOf(job.source_url) === -1)) {
+                            sVid.src = job.source_url;
+                            sVid.load();
+                            videoLoaded = true;
+                            const b = document.getElementById('videoStatusBadge');
+                            if (b) {
+                                b.innerText = "Đã nạp video 24/7";
+                                b.className = "text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold";
+                            }
+                        }
+                    }
+
+                    // Khôi phục phụ đề nếu có
+                    if (job.segments && job.segments.length > 0) {
+                        segments = job.segments;
+                        renderSubTable();
+                        drawOverlayOnCanvas();
+                    }
+
                     if (job.status === 'running') {
-                        showToast("⚡ Phát hiện tiến trình 24/7 đang tiếp tục chạy ngầm từ trước! Đang tiếp tục theo dõi...", 5000);
+                        setStatus(job.percent || 10, job.message || "Đang xử lý 24/7 ngầm trên máy chủ...");
+                        showToast("⚡ Phát hiện tiến trình 24/7 đang tiếp tục chạy ngầm từ trước! Đang tiếp tục đồng bộ...", 5000);
                         pollServerJob(job.job_id);
                     } else if (job.status === 'completed') {
                         setStatus(100, "Tiến trình 24/7 đã hoàn tất!");
-                        if (job.segments && job.segments.length) {
-                            segments = job.segments;
-                            renderSubTable();
-                            drawOverlayOnCanvas();
-                        }
                         const outVideo = document.getElementById('outputVideo');
                         document.getElementById('outputPlaceholder').classList.add('hidden');
                         outVideo.classList.remove('hidden');
@@ -4143,7 +4249,42 @@ HTML_TEMPLATE = """
                         dlBtn.href = job.output_url;
                         dlBtn.classList.remove('hidden');
 
+                        const mobDl = document.getElementById('mobileDownloadBtn');
+                        if (mobDl) {
+                            mobDl.href = job.output_url;
+                            mobDl.classList.remove('hidden');
+                        }
+
+                        const rBadge = document.getElementById('renderBadge');
+                        if (rBadge) {
+                            rBadge.innerText = "24/7 Hoàn Thành 100%";
+                            rBadge.className = "text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold";
+                        }
+
                         showToast("🎉 Tiến trình 24/7 đã hoàn tất trong lúc bạn rời trang web/tắt máy! Video đã sẵn sàng xem & tải về.", 8000);
+                    } else if (job.status === 'error') {
+                        setStatus(0, "Lỗi tiến trình 24/7: " + (job.error || "Không rõ nguyên nhân"));
+                        const btn = document.getElementById('btnAutoAll');
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.classList.remove('opacity-60', 'cursor-not-allowed');
+                        }
+                    }
+                    return;
+                }
+
+                // Trường hợp 2: Có video đã tải lên trong phiên làm việc hiện tại
+                if (data.has_input_video && data.source_url) {
+                    const sVid = document.getElementById('sourceVideo');
+                    if (sVid && !sVid.src) {
+                        sVid.src = data.source_url;
+                        sVid.load();
+                        videoLoaded = true;
+                        const b = document.getElementById('videoStatusBadge');
+                        if (b) {
+                            b.innerText = "Đã nạp video";
+                            b.className = "text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold";
+                        }
                     }
                 }
             } catch (e) {
@@ -4287,11 +4428,68 @@ HTML_TEMPLATE = """
             document.getElementById('progressBar').style.width = p + '%';
             document.getElementById('statusPercent').innerText = p + '%';
             document.getElementById('statusText').innerText = msg;
+            const mobStatus = document.getElementById('mobileBottomStatus');
+            if (mobStatus) mobStatus.innerText = msg;
         }
+
+        // ================= TỰ ĐỘNG NHẬN DIỆN & TÙY CHỌN GIAO DIỆN ĐIỆN THOẠI / MÁY TÍNH =================
+        let isMobileDevice = false;
+
+        function detectDeviceMode() {
+            const savedPref = localStorage.getItem('nexus_device_mode');
+            if (savedPref === 'mobile') {
+                applyDeviceMode(true);
+                return;
+            } else if (savedPref === 'desktop') {
+                applyDeviceMode(false);
+                return;
+            }
+
+            // Tự động nhận diện dựa trên User Agent hoặc kích thước màn hình
+            const ua = navigator.userAgent || '';
+            const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+            const isSmallScreen = window.innerWidth < 1024;
+            applyDeviceMode(isMobileUA || isSmallScreen);
+        }
+
+        function applyDeviceMode(mobile) {
+            isMobileDevice = mobile;
+            const body = document.body;
+            const toggleBtn = document.getElementById('deviceModeToggleBtn');
+            const icon = document.getElementById('deviceModeIcon');
+            const text = document.getElementById('deviceModeText');
+            const mobBar = document.getElementById('mobileBottomBar');
+
+            if (mobile) {
+                body.classList.add('is-mobile');
+                if (icon) icon.className = "fa-solid fa-desktop text-emerald-400";
+                if (text) text.innerText = "Desktop";
+                if (mobBar) mobBar.classList.remove('hidden');
+            } else {
+                body.classList.remove('is-mobile');
+                if (icon) icon.className = "fa-solid fa-mobile-screen text-sky-400";
+                if (text) text.innerText = "Mobile";
+                if (mobBar) mobBar.classList.add('hidden');
+            }
+        }
+
+        function toggleDeviceModeManual() {
+            const nextMode = !isMobileDevice;
+            localStorage.setItem('nexus_device_mode', nextMode ? 'mobile' : 'desktop');
+            applyDeviceMode(nextMode);
+            showToast(nextMode ? "📱 Đã chuyển sang giao diện Tối ưu cho Điện Thoại!" : "💻 Đã chuyển sang giao diện Máy Tính!", 3500);
+        }
+
+        window.addEventListener('resize', () => {
+            if (!localStorage.getItem('nexus_device_mode')) {
+                detectDeviceMode();
+            }
+        });
 
         window.addEventListener('DOMContentLoaded', () => {
             applyTheme(localStorage.getItem('nexus_theme') || 'cyber');
             setSubFontSize(localStorage.getItem('nexus_sub_font_size') || 'medium');
+            detectDeviceMode();
             checkLicenseStatusOnLoad();
             checkActiveServerJob();
         });
@@ -4731,21 +4929,40 @@ def do_transcribe_core(video_path, model_size="small", device_req="auto", source
     from faster_whisper import WhisperModel
     progress_cb(12, f"Đang khởi tạo Whisper ({model_size}) trên máy trạm...")
 
-    cpu_threads = HARDWARE_INFO["cpu_threads"]
+    cpu_threads = max(1, min(HARDWARE_INFO.get("cpu_threads", 4), 4))
     device_mode = "cpu"
     compute_mode = "int8"
-    if device_req == "cuda" or (device_req == "auto" and HARDWARE_INFO.get("cuda_available")):
+    model = None
+
+    # Danh sách fallback an toàn để chống tràn RAM / OOM trên Cloud Container (Railway/VPS)
+    models_to_try = [model_size]
+    for fb in ["base", "tiny"]:
+        if fb not in models_to_try:
+            models_to_try.append(fb)
+
+    for m_cand in models_to_try:
         try:
-            device_mode = "cuda"
-            compute_mode = "float16"
-            model = WhisperModel(model_size, device=device_mode, compute_type=compute_mode)
-        except Exception as e_cuda:
-            print(f"[!] Không thể chạy Whisper trên CUDA ({e_cuda}), tự động fallback CPU...")
-            device_mode = "cpu"
-            compute_mode = "int8"
-            model = WhisperModel(model_size, device=device_mode, compute_type=compute_mode, cpu_threads=cpu_threads)
-    else:
-        model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
+            if (device_req == "cuda" or (device_req == "auto" and HARDWARE_INFO.get("cuda_available"))) and m_cand == model_size:
+                try:
+                    device_mode = "cuda"
+                    compute_mode = "float16"
+                    model = WhisperModel(m_cand, device=device_mode, compute_type=compute_mode)
+                    break
+                except Exception as e_cuda:
+                    print(f"[!] Không thể chạy Whisper trên CUDA ({e_cuda}), tự động fallback CPU...", flush=True)
+                    device_mode = "cpu"
+                    compute_mode = "int8"
+            
+            model = WhisperModel(m_cand, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
+            if m_cand != model_size:
+                print(f"[i] Đã tự động tối ưu hóa Model Whisper sang '{m_cand}' để đảm bảo an toàn bộ nhớ 24/7.", flush=True)
+            break
+        except (MemoryError, Exception) as mem_err:
+            print(f"[!] Không thể nạp Whisper model '{m_cand}' ({mem_err}), đang thử model nhỏ hơn...", flush=True)
+            continue
+
+    if model is None:
+        raise RuntimeError("Không đủ bộ nhớ để tải mô hình tách tiếng Whisper. Vui lòng thử lại với video ngắn hơn hoặc chọn model tiny!")
 
     _, _, total_dur = get_video_info(video_path)
     progress_cb(20, f"Bắt đầu tách giọng nói bằng Whisper ({device_mode.upper()})...")
@@ -5451,6 +5668,7 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
             job_video_path = video_path
 
     active_video = job_video_path if os.path.exists(job_video_path) else video_path
+    source_url = f"/api/pipeline/job_video/{job_id}/input_video.mp4"
 
     def update_job(pct, msg, step=None, status="running", error=None, output_url=None, segments=None):
         with SERVER_JOBS_LOCK:
@@ -5461,6 +5679,7 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
             })
             job["percent"] = int(pct)
             job["message"] = msg
+            job["source_url"] = source_url
             job["updated_at"] = datetime.now().isoformat()
             if step: job["step"] = step
             if status: job["status"] = status
@@ -5652,6 +5871,15 @@ def api_pipeline_active_job():
 
     if latest_job:
         return jsonify({"active": True, "job": latest_job})
+
+    # 4. Nếu không có job, kiểm tra xem có video đã tải lên trong phiên làm việc hiện tại không
+    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    if os.path.exists(video_path):
+        return jsonify({
+            "active": False,
+            "has_input_video": True,
+            "source_url": "/temp_session/input_video.mp4"
+        })
 
     return jsonify({"active": False})
 
