@@ -1079,7 +1079,7 @@ def run_worker():
                                     await asyncio.wait_for(comm.save(out_f), timeout=12)
                                     if os.path.exists(out_f) and os.path.getsize(out_f) > 100:
                                         ok = True; break
-                                catch Exception: pass
+                                except Exception: pass
                         if not ok:
                             g_tl = tts_voice.split(":", 1)[1] if tts_voice.startswith("google:") else google_lang_code
                             try:
@@ -1426,13 +1426,34 @@ def dispatch_kaggle_t4_worker(job_id):
 
     os.environ["KAGGLE_USERNAME"] = username
     os.environ["KAGGLE_KEY"] = key
-    kaggle_dir = os.path.expanduser("~/.kaggle")
-    os.makedirs(kaggle_dir, exist_ok=True)
-    kaggle_json_path = os.path.join(kaggle_dir, "kaggle.json")
-    with open(kaggle_json_path, "w", encoding="utf-8") as f:
-        json.dump({"username": username, "key": key}, f)
+    os.environ["KAGGLE_API_TOKEN"] = key
+
+    kaggle_env = dict(os.environ)
+    kaggle_env["KAGGLE_USERNAME"] = username
+    kaggle_env["KAGGLE_KEY"] = key
+    kaggle_env["KAGGLE_API_TOKEN"] = key
+
+    # Ghi file kaggle.json và access_token ở cả ~/.kaggle và /tmp/.kaggle để Kaggle CLI nhận diện 100%
+    target_dirs = [os.path.expanduser("~/.kaggle")]
     if os.name != "nt":
-        os.chmod(kaggle_json_path, 0o600)
+        target_dirs.extend(["/root/.kaggle", "/tmp/.kaggle"])
+
+    for k_dir in target_dirs:
+        try:
+            os.makedirs(k_dir, exist_ok=True)
+            k_json = os.path.join(k_dir, "kaggle.json")
+            with open(k_json, "w", encoding="utf-8") as f:
+                json.dump({"username": username, "key": key}, f)
+            k_tok = os.path.join(k_dir, "access_token")
+            with open(k_tok, "w", encoding="utf-8") as f:
+                f.write(key)
+            if os.name != "nt":
+                os.chmod(k_json, 0o600)
+                os.chmod(k_tok, 0o600)
+        except Exception:
+            pass
+
+    kaggle_env["KAGGLE_CONFIG_DIR"] = target_dirs[0]
 
     try:
         import six
@@ -1467,7 +1488,8 @@ def dispatch_kaggle_t4_worker(job_id):
     update_progress(5, f"Đang khởi tạo phiên GPU T4 trên Kaggle ({username}/{slug})...")
     proc = subprocess.run(
         [sys.executable, "-m", "kaggle", "kernels", "push", "-p", KAGGLE_PUSH_DIR],
-        capture_output=True, text=True, encoding="utf-8", errors="ignore"
+        capture_output=True, text=True, encoding="utf-8", errors="ignore",
+        env=kaggle_env
     )
     if proc.returncode != 0:
         err_raw = (proc.stderr or proc.stdout or "").strip()
