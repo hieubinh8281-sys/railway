@@ -855,7 +855,7 @@ def translate_google_batch_cloud(items, target_lang='vi'):
 
 def call_gemini(api_keys, idx, model_pref, prompt):
     valid_models = []
-    for m in [model_pref, "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"]:
+    for m in [model_pref, "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
         if m and m not in valid_models:
             valid_models.append(m)
     base_payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.15}}
@@ -895,7 +895,7 @@ def run_worker():
     addon_cfg = cfg_resp.get("addon_settings", {})
     has_logo_remote = cfg_resp.get("has_logo", False)
     api_keys = cfg_resp.get("apiKeys", [])
-    gemini_model = cfg_resp.get("geminiModel", "gemini-3.0-flash")
+    gemini_model = cfg_resp.get("geminiModel", "gemini-3.5-flash")
     whisper_model = cfg_resp.get("whisperModel", "small")
     target_lang_label = st.get("targetLangLabel", "Tiếng Việt")
     google_lang_code = st.get("googleLangCode", "vi")
@@ -2262,12 +2262,14 @@ HTML_TEMPLATE = """
                         </div>
 
                         <div>
-                            <label class="text-[11px] text-slate-400">Model Gemini Dịch Thuật</label>
+                            <label class="text-[11px] text-slate-400">Model Gemini Dịch Thuật (Thế Hệ Mới)</label>
                             <select id="geminiModel" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none">
-                                <option value="gemini-2.0-flash" selected>gemini-2.0-flash (Tốc độ cao & Thông minh nhất - Khuyên dùng)</option>
-                                <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (Cực nhanh & Tiết kiệm Quota)</option>
-                                <option value="gemini-1.5-flash">gemini-1.5-flash (Chuẩn ổn định, Quota rộng rãi)</option>
-                                <option value="gemini-1.5-pro">gemini-1.5-pro (Dịch văn học & Điện ảnh sâu sắc)</option>
+                                <option value="gemini-3.5-flash" selected>gemini-3.5-flash (Thế Hệ 3 Mới Nhất - Siêu Nhanh & Chuẩn Xác 100%)</option>
+                                <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Cực Nhanh & Tiết Kiệm Quota Miễn Phí)</option>
+                                <option value="gemini-3.8-flash">gemini-3.8-flash (Model Flash Cao Cấp & Thông Minh Nhất)</option>
+                                <option value="gemini-3.5-pro">gemini-3.5-pro (Dịch Văn Học, Điện Ảnh Chuyên Sâu)</option>
+                                <option value="gemini-2.5-flash">gemini-2.5-flash (Thế Hệ 2.5 Ổn Định)</option>
+                                <option value="gemini-2.0-flash">gemini-2.0-flash (Legacy Fallback)</option>
                             </select>
                         </div>
                     </div>
@@ -3545,6 +3547,7 @@ HTML_TEMPLATE = """
                 marginV: parseInt(document.getElementById('marginV').value || 28),
                 pronounRule: getActivePronounRule(),
                 contextGlossary: document.getElementById('contextGlossary').value || '',
+                geminiModel: document.getElementById('geminiModel') ? document.getElementById('geminiModel').value : 'gemini-3.5-flash',
                 syncMode: document.getElementById('syncMode') ? document.getElementById('syncMode').value : 'retime_video',
                 enableTts: document.getElementById('enableTts').checked,
                 ttsVoice: document.getElementById('ttsVoice').value || 'piper:vi_VN-vais1000-medium',
@@ -3562,6 +3565,9 @@ HTML_TEMPLATE = """
             if (st.translationEngine && document.getElementById('translationEngine')) {
                 document.getElementById('translationEngine').value = st.translationEngine;
                 if (typeof onTranslationEngineChange === 'function') onTranslationEngineChange();
+            }
+            if (st.geminiModel && document.getElementById('geminiModel')) {
+                document.getElementById('geminiModel').value = st.geminiModel;
             }
             if (st.whisperSourceLang && document.getElementById('whisperSourceLang')) {
                 document.getElementById('whisperSourceLang').value = st.whisperSourceLang;
@@ -5745,7 +5751,7 @@ def parse_llm_translation_response(raw_text, expected_ids):
 
 def call_gemini_single_batch(api_keys, start_key_idx, preferred_model, prompt_text):
     valid_models = []
-    for m in [preferred_model, "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"]:
+    for m in [preferred_model, "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
         if m and m not in valid_models:
             valid_models.append(m)
 
@@ -5777,7 +5783,7 @@ def call_gemini_single_batch(api_keys, start_key_idx, preferred_model, prompt_te
 def api_analyze_context():
     data = request.json
     api_keys = [k.strip() for k in data.get("apiKeys", []) if k and k.strip()]
-    preferred_model = data.get("model", "gemini-2.0-flash")
+    preferred_model = data.get("model", "gemini-3.5-flash")
     target_lang_label = data.get("targetLangLabel", "Tiếng Việt")
     segments = data.get("segments", [])
     if not api_keys or not segments:
@@ -5811,24 +5817,32 @@ def api_validate_gemini_keys():
     results = []
     for k in keys:
         masked = k[:6] + "..." + k[-4:] if len(k) > 10 else k
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={k}"
         payload = {"contents": [{"parts": [{"text": "Hi"}]}], "generationConfig": {"maxOutputTokens": 3}}
-        try:
-            r = requests.post(url, json=payload, timeout=8)
-            if r.status_code == 200:
-                results.append({"key": masked, "valid": True, "status": "Hoạt động cực tốt (Ready)"})
-            elif r.status_code == 429:
-                results.append({"key": masked, "valid": False, "status": "Hết hạn mức phút (Rate limit 429)"})
-            else:
-                err_msg = r.json().get("error", {}).get("message", f"Mã lỗi {r.status_code}") if r.text.startswith("{") else f"Mã {r.status_code}"
-                results.append({"key": masked, "valid": False, "status": f"Không dùng được: {err_msg[:45]}"})
-        except Exception as e:
-            results.append({"key": masked, "valid": False, "status": f"Lỗi kết nối ({str(e)[:30]})"})
+        ok = False
+        status_msg = "Không dùng được"
+        for test_m in ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{test_m}:generateContent?key={k}"
+            try:
+                r = requests.post(url, json=payload, timeout=8)
+                if r.status_code == 200:
+                    ok = True
+                    status_msg = f"Hoạt động cực tốt ({test_m})"
+                    break
+                elif r.status_code == 429:
+                    status_msg = "Hết hạn mức phút (Rate limit 429)"
+                    break
+                else:
+                    err_msg = r.json().get("error", {}).get("message", f"Mã {r.status_code}") if r.text.startswith("{") else f"Mã {r.status_code}"
+                    status_msg = f"Lỗi ({test_m}): {err_msg[:45]}"
+            except Exception as e:
+                status_msg = f"Lỗi kết nối ({str(e)[:30]})"
+
+        results.append({"key": masked, "valid": ok, "status": status_msg})
 
     valid_c = sum(1 for r in results if r["valid"])
     return jsonify({"results": results, "valid_count": valid_c})
 
-def do_translate_core(segments, api_keys=None, preferred_model="gemini-2.0-flash", target_lang="vi", target_lang_label="Tiếng Việt", google_lang_code="vi", pronoun_rule="auto", context_glossary="", engine="hybrid", force_all=False, progress_cb=None):
+def do_translate_core(segments, api_keys=None, preferred_model="gemini-3.5-flash", target_lang="vi", target_lang_label="Tiếng Việt", google_lang_code="vi", pronoun_rule="auto", context_glossary="", engine="hybrid", force_all=False, progress_cb=None):
     if progress_cb is None:
         progress_cb = update_progress
 
@@ -5961,7 +5975,7 @@ def do_translate_core(segments, api_keys=None, preferred_model="gemini-2.0-flash
 def translate_subtitles():
     data = request.json or {}
     api_keys = [k.strip() for k in data.get("apiKeys", []) if k and k.strip()]
-    preferred_model = data.get("model", "gemini-2.0-flash")
+    preferred_model = data.get("model", "gemini-3.5-flash")
     target_lang = data.get("targetLang", "vi")
     target_lang_label = data.get("targetLangLabel", "Tiếng Việt")
     google_lang_code = data.get("googleLangCode", target_lang)
@@ -6468,7 +6482,7 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
             google_lang_code = settings.get("googleLangCode", target_lang)
             pronoun_rule = settings.get("pronounRule", "auto")
             context_glossary = settings.get("contextGlossary", "")
-            pref_model = settings.get("geminiModel", "gemini-2.0-flash")
+            pref_model = settings.get("geminiModel", "gemini-3.5-flash")
 
             def translat_cb(p, m): update_job(38 + int(p * 0.32), m, step="translate")
             segments, locked_ctx, _ = do_translate_core(
@@ -6521,7 +6535,7 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
             "segments": initial_segments or [],
             "apiKeys": api_keys or [],
             "engine": engine or "hybrid",
-            "geminiModel": settings.get("geminiModel", "gemini-2.0-flash"),
+            "geminiModel": settings.get("geminiModel", "gemini-3.5-flash"),
             "whisperModel": settings.get("whisperModel", "small"),
             "settings": settings,
             "addon_settings": dict(ADDON_SETTINGS),
