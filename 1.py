@@ -542,7 +542,7 @@ def load_cloud_config():
         "kaggle_username": os.environ.get("KAGGLE_USERNAME", ""),
         "kaggle_key": os.environ.get("KAGGLE_KEY", ""),
         "kaggle_kernel_slug": os.environ.get("KAGGLE_KERNEL_SLUG", "nexus-vietsub-worker"),
-        "github_token": os.environ.get("GITHUB_TOKEN", "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"),
+        "github_token": os.environ.get("GITHUB_TOKEN", ""),
         "github_repo": os.environ.get("GITHUB_REPO", "hieubinh8281-sys/nexus-worker2"),
         "github_codespace_name": os.environ.get("GITHUB_CODESPACE_NAME", "")
     }
@@ -555,6 +555,18 @@ def load_cloud_config():
                         default_cfg[k] = v
         except Exception:
             pass
+    # Railway Variables take top priority so user can store secret tokens safely without pushing to public Git
+    for env_k, cfg_k in [
+        ("GITHUB_TOKEN", "github_token"),
+        ("GITHUB_REPO", "github_repo"),
+        ("KAGGLE_USERNAME", "kaggle_username"),
+        ("KAGGLE_KEY", "kaggle_key"),
+        ("KAGGLE_KERNEL_SLUG", "kaggle_kernel_slug"),
+        ("GITHUB_CODESPACE_NAME", "github_codespace_name")
+    ]:
+        val = os.environ.get(env_k)
+        if val and val.strip():
+            default_cfg[cfg_k] = val.strip()
     return default_cfg
 
 def save_cloud_config(cfg):
@@ -1212,7 +1224,7 @@ def dispatch_kaggle_t4_worker(job_id):
     slug = cfg.get("kaggle_kernel_slug", "nexus-vietsub-worker").strip() or "nexus-vietsub-worker"
 
     if not username or not key:
-        raise RuntimeError("Chưa cấu hình Kaggle Username & API Key! Hãy bấm nút '☁️ Cấu Hình Cloud' trên thanh công cụ.")
+        raise RuntimeError("Chưa cấu hình Kaggle Username & API Key! Hãy bấm nút '☁️ Cấu Hình Cloud' trên thanh công cụ để nhập thông tin.")
 
     os.environ["KAGGLE_USERNAME"] = username
     os.environ["KAGGLE_KEY"] = key
@@ -1224,9 +1236,12 @@ def dispatch_kaggle_t4_worker(job_id):
     if os.name != "nt":
         os.chmod(kaggle_json_path, 0o600)
 
-    if not shutil.which("kaggle"):
-        update_progress(4, "Đang cài đặt thư viện kết nối 'kaggle'...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle"])
+    try:
+        import kaggle
+        import six
+    except ImportError:
+        update_progress(4, "Đang cài đặt thư viện 'kaggle' & 'six'...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle>=1.6.14", "six>=1.16.0"])
 
     shutil.rmtree(KAGGLE_PUSH_DIR, ignore_errors=True)
     os.makedirs(KAGGLE_PUSH_DIR, exist_ok=True)
@@ -1252,13 +1267,15 @@ def dispatch_kaggle_t4_worker(job_id):
         json.dump(kernel_meta, f, indent=2)
 
     update_progress(5, f"Đang khởi tạo phiên GPU T4 trên Kaggle ({username}/{slug})...")
-    kaggle_cmd = shutil.which("kaggle") or "kaggle"
     proc = subprocess.run(
-        [kaggle_cmd, "kernels", "push", "-p", KAGGLE_PUSH_DIR],
+        [sys.executable, "-m", "kaggle", "kernels", "push", "-p", KAGGLE_PUSH_DIR],
         capture_output=True, text=True, encoding="utf-8", errors="ignore"
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"Lỗi đẩy phiên lên Kaggle: {proc.stderr or proc.stdout}")
+        err_raw = (proc.stderr or proc.stdout or "").strip()
+        if "401" in err_raw or "Unauthorized" in err_raw or "403" in err_raw or "credentials" in err_raw.lower():
+            raise RuntimeError(f"Kaggle API Key hoặc Username không hợp lệ ({err_raw})! Hãy kiểm tra lại trong '☁️ Cấu Hình Cloud' hoặc tải file kaggle.json mới.")
+        raise RuntimeError(f"Lỗi đẩy phiên lên Kaggle: {err_raw}")
 
     update_progress(8, "Đã bật phiên Kaggle GPU T4! Đang chờ Kaggle tải Video từ Trạm Trung Chuyển...")
 
@@ -1268,7 +1285,7 @@ def dispatch_github_vps_worker(job_id, relay_url=None):
     repo = cfg.get("github_repo", "").strip()
 
     if not token or "/" not in repo:
-        raise RuntimeError("Chưa cấu hình GitHub Token hoặc Repo (vd: ten_ban/vietsub-worker)! Hãy bấm nút '☁️ Cấu Hình Cloud'.")
+        raise RuntimeError("Chưa cấu hình GitHub Token hoặc Repo! Hãy bấm nút '☁️ Cấu Hình Cloud' trên thanh công cụ để nhập Token mới.")
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -1284,6 +1301,9 @@ def dispatch_github_vps_worker(job_id, relay_url=None):
 
     update_progress(4, f"Đang kết nối tới GitHub VPS ({repo})...")
     r_check = requests.get(f"https://api.github.com/repos/{repo}", headers=headers, timeout=15)
+    if r_check.status_code == 401:
+        raise RuntimeError("GitHub Token không hợp lệ hoặc đã bị GitHub vô hiệu hóa (401 Bad credentials)! Hãy tạo Personal Access Token (Classic) mới trên GitHub với quyền 'repo' và 'workflow', sau đó dán vào '☁️ Cấu Hình Cloud' hoặc nhập vào Railway Variables (GITHUB_TOKEN).")
+
     if r_check.status_code == 404:
         repo_name = repo.split("/")[1]
         requests.post(
@@ -1359,17 +1379,13 @@ jobs:
         json={"ref": default_branch, "inputs": {"relay_url": relay_url, "job_id": job_id}},
         timeout=20
     )
-    if disp_resp.status_code not in (200, 201, 204):
-        raise RuntimeError(f"Lỗi kích hoạt GitHub VPS ({disp_resp.status_code}): {disp_resp.text}")
-
-    update_progress(8, "Đã khởi tạo phiên GitHub VPS 6h! Đang chờ máy chủ nhận Video từ Trạm Trung Chuyển...")
-    disp_resp = requests.post(
-        disp_url,
-        headers=headers,
-        json={"ref": default_branch, "inputs": {"relay_url": relay_url, "job_id": job_id}},
-        timeout=20
-    )
-    if disp_resp.status_code not in (200, 201, 204):
+    if disp_resp.status_code == 401:
+        raise RuntimeError("GitHub Token bị từ chối xác thực (401 Bad credentials)! Hãy tạo Personal Access Token mới trên GitHub và cập nhật lại.")
+    elif disp_resp.status_code == 403:
+        raise RuntimeError("GitHub Token không đủ quyền kích hoạt GitHub Actions (403 Forbidden)! Khi tạo Token trên GitHub, hãy đảm bảo đã tích chọn cả quyền 'repo' VÀ 'workflow'.")
+    elif disp_resp.status_code == 404:
+        raise RuntimeError(f"Không tìm thấy file workflow nexus_worker.yml trên repo '{repo}' hoặc Actions chưa được bật! Vui lòng vào Repo Settings -> Actions -> General -> Bật 'Allow all actions and reusable workflows'.")
+    elif disp_resp.status_code not in (200, 201, 204):
         raise RuntimeError(f"Lỗi kích hoạt GitHub VPS ({disp_resp.status_code}): {disp_resp.text}")
 
     update_progress(8, "Đã khởi tạo phiên GitHub VPS 6h! Đang chờ máy chủ nhận Video từ Trạm Trung Chuyển...")
@@ -4257,6 +4273,9 @@ HTML_TEMPLATE = """
                         document.getElementById('btnAutoAll').classList.remove('opacity-60', 'cursor-not-allowed');
                         const errDesc = data.error || data.message || "Đã xảy ra sự cố trong quá trình xử lý 24/7 trên máy chủ.";
                         alert("Tiến trình 24/7 gặp lỗi: " + errDesc);
+                        if (errDesc.includes("Kaggle") || errDesc.includes("GitHub") || errDesc.includes("401") || errDesc.includes("Token") || errDesc.includes("credentials") || errDesc.includes("Cấu Hình Cloud")) {
+                            openCloudModal();
+                        }
                     }
                 } catch (e) {
                     console.warn("Polling retry...", e);
