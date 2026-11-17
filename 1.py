@@ -597,7 +597,20 @@ def ensure_requests():
 
 requests = ensure_requests()
 
-def report_progress(pct, msg, segments=None, locked_context=None):
+_LAST_PROGRESS_TIME = 0.0
+_LAST_PROGRESS_PCT = -1
+
+def report_progress(pct, msg, segments=None, locked_context=None, force=False):
+    global _LAST_PROGRESS_TIME, _LAST_PROGRESS_PCT
+    now = time.time()
+    # Throttle progress reports: don't flood HTTP requests unless forced or has payload
+    if not force and segments is None and locked_context is None:
+        if pct == _LAST_PROGRESS_PCT and (now - _LAST_PROGRESS_TIME) < 4.0:
+            return
+        if (now - _LAST_PROGRESS_TIME) < 2.5 and pct < 100:
+            return
+    _LAST_PROGRESS_TIME = now
+    _LAST_PROGRESS_PCT = pct
     print(f"[CLOUD WORKER {pct}%] {msg}", flush=True)
     payload = {"job_id": JOB_ID, "percent": pct, "message": f"☁️ [Cloud] {msg}"}
     if segments is not None:
@@ -605,7 +618,7 @@ def report_progress(pct, msg, segments=None, locked_context=None):
     if locked_context is not None:
         payload["locked_context"] = locked_context
     try:
-        requests.post(f"{RELAY_URL}/api/relay/progress", json=payload, timeout=15)
+        requests.post(f"{RELAY_URL}/api/relay/progress", json=payload, timeout=10)
     except Exception as e:
         print(f"[!] Lỗi báo cáo tiến độ: {e}")
 
@@ -647,15 +660,19 @@ def setup_cloud_piper(work_dir, voice_id):
     piper_dir = os.path.join(work_dir, "piper_bin")
     piper_exe = os.path.join(piper_dir, "piper", "piper")
     if not os.path.exists(piper_exe):
-        os.makedirs(piper_dir, exist_ok=True)
-        tgz = os.path.join(piper_dir, "piper.tar.gz")
-        r = requests.get("https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz", stream=True, timeout=90)
-        with open(tgz, "wb") as f:
-            for c in r.iter_content(65536):
-                if c: f.write(c)
-        with tarfile.open(tgz, "r:gz") as tf:
-            tf.extractall(piper_dir)
-        os.chmod(piper_exe, 0o755)
+        try:
+            os.makedirs(piper_dir, exist_ok=True)
+            tgz = os.path.join(piper_dir, "piper.tar.gz")
+            r = requests.get("https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz", stream=True, timeout=90)
+            with open(tgz, "wb") as f:
+                for c in r.iter_content(65536):
+                    if c: f.write(c)
+            with tarfile.open(tgz, "r:gz") as tf:
+                tf.extractall(piper_dir)
+            if os.path.exists(piper_exe):
+                os.chmod(piper_exe, 0o755)
+        except Exception as e_p:
+            print(f"[!] Lỗi tải bộ Piper Linux: {e_p}")
 
     model_name = voice_id.replace("piper:", "").strip()
     m_dir = os.path.join(work_dir, "piper_models")
@@ -1010,24 +1027,43 @@ def run_worker():
     # BƯỚC 3: TẠO GIỌNG ĐỌC ĐA NGÔN NGỮ (PIPER NEURAL ONNX / EDGE AI / GOOGLE TTS) TRÊN CLOUD
     tts_dir = os.path.join(work_dir, "tts")
     os.makedirs(tts_dir, exist_ok=True)
-    final_audio = os.path.join(work_dir, "mixed_audio.aac")
+    final_audio = os.path.join(work_dir, "mixed_audio.wav")
     enable_tts = st.get("enableTts", True)
     tts_voice = st.get("ttsVoice", "piper:vi_VN-vais1000-medium")
     orig_vol = float(st.get("origVolume", 15)) / 100.0
 
     if enable_tts:
         if tts_voice.startswith("piper:"):
-            report_progress(62, f"Đang tải nhân Piper Neural ONNX ({tts_voice}) trên Cloud...")
+            report_progress(62, f"Đang tải nhân Piper Neural ONNX ({tts_voice}) trên Cloud...", force=True)
             piper_exe, onnx_path = setup_cloud_piper(work_dir, tts_voice)
+            piper_env = os.environ.copy()
+            piper_dir_bin = os.path.dirname(piper_exe)
+            piper_env["LD_LIBRARY_PATH"] = f"{piper_dir_bin}:{piper_env.get('LD_LIBRARY_PATH', '')}"
+
             def run_piper_one(seg):
                 txt = (seg.get("trans") or seg.get("text") or "").strip()
                 if not txt: return
                 out_wav = os.path.join(tts_dir, f"s_{seg['id']}.wav")
-                subprocess.run([piper_exe, "--model", onnx_path, "--output_file", out_wav], input=txt.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            with ThreadPoolExecutor(max_workers=12) as ex:
+                if os.path.exists(out_wav) and os.path.getsize(out_wav) > 100:
+                    return
+                if os.path.exists(piper_exe) and os.path.exists(onnx_path):
+                    try:
+                        subprocess.run([piper_exe, "--model", onnx_path, "--output_file", out_wav], input=txt.encode("utf-8"), env=piper_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception: pass
+                # Fallback sang Google TTS nếu Piper lỗi trên môi trường Cloud
+                if not os.path.exists(out_wav) or os.path.getsize(out_wav) < 100:
+                    try:
+                        g_r = requests.get("https://translate.googleapis.com/translate_tts", params={"ie":"UTF-8","q":txt[:200],"tl":google_lang_code,"client":"tw-ob"}, timeout=10)
+                        if g_r.status_code == 200:
+                            with open(out_wav.replace(".wav", ".mp3"), "wb") as f_g:
+                                f_g.write(g_r.content)
+                    except Exception: pass
+
+            worker_threads = min(4, max(2, os.cpu_count() or 2))
+            with ThreadPoolExecutor(max_workers=worker_threads) as ex:
                 list(ex.map(run_piper_one, segments))
         else:
-            report_progress(62, f"Đang tạo giọng đọc đa luồng ({tts_voice}) trên Cloud...")
+            report_progress(62, f"Đang tạo giọng đọc đa luồng ({tts_voice}) trên Cloud...", force=True)
             async def make_tts():
                 sem = asyncio.Semaphore(16)
                 async def one_tts(seg):
@@ -1043,7 +1079,7 @@ def run_worker():
                                     await asyncio.wait_for(comm.save(out_f), timeout=12)
                                     if os.path.exists(out_f) and os.path.getsize(out_f) > 100:
                                         ok = True; break
-                                except Exception: pass
+                                catch Exception: pass
                         if not ok:
                             g_tl = tts_voice.split(":", 1)[1] if tts_voice.startswith("google:") else google_lang_code
                             try:
@@ -1054,37 +1090,147 @@ def run_worker():
                 await asyncio.gather(*[one_tts(s) for s in segments])
             asyncio.run(make_tts())
 
-        report_progress(72, "Đang đồng bộ tốc độ âm thanh khớp Timeline trên Cloud...")
-        def sync_one(seg):
+        sync_mode = st.get("syncMode", "retime_video")
+        audio_clips = {}
+        audio_durs = {}
+
+        def load_clip_one(seg):
             c_path = os.path.join(tts_dir, f"s_{seg['id']}.wav")
             if not os.path.exists(c_path):
                 c_path = os.path.join(tts_dir, f"s_{seg['id']}.mp3")
             if not os.path.exists(c_path): return None
-            s_ms, e_ms = int(seg["start"]*1000), int(seg["end"]*1000)
-            t_dur = max(300, e_ms - s_ms)
-            clip = AudioSegment.from_file(c_path)
-            if len(clip) > t_dur:
-                ratio = min(1.85, len(clip) / t_dur)
-                f_path = os.path.join(tts_dir, f"f_{seg['id']}.wav")
-                subprocess.run(["ffmpeg", "-y", "-i", c_path, "-filter:a", f"atempo={ratio:.3f}", f_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if os.path.exists(f_path) and os.path.getsize(f_path) > 100:
-                    clip = AudioSegment.from_file(f_path)
-            return (s_ms, clip)
+            try:
+                clip = AudioSegment.from_file(c_path)
+                return (seg["id"], clip, len(clip) / 1000.0)
+            except Exception:
+                return None
 
-        synced = []
         with ThreadPoolExecutor(max_workers=16) as ex:
-            for res in ex.map(sync_one, segments):
-                if res: synced.append(res)
+            for res in ex.map(load_clip_one, segments):
+                if res:
+                    sid, clip, dur = res
+                    audio_clips[sid] = clip
+                    audio_durs[sid] = dur
 
-        if has_audio:
-            orig_a = AudioSegment.from_file(video_path)
-            master_a = AudioSegment.silent(duration=len(orig_a)) if orig_vol <= 0.01 else orig_a.apply_gain(20 * math.log10(orig_vol))
+        video_input_name = "input_video.mp4"
+
+        # CHẾ ĐỘ 1: CO GIÃN VIDEO THEO CÂU NÓI (GIỮ GIỌNG TỰ NHIÊN 1.0X CHUẨN STUDIO)
+        if sync_mode == "retime_video" and audio_clips:
+            report_progress(74, "Đang tính toán timeline co giãn Video theo từng câu nói...", force=True)
+            intervals = []
+            cur_orig = 0.0
+            new_timeline = 0.0
+            new_segments = []
+
+            for seg in segments:
+                s_start, s_end = float(seg["start"]), float(seg["end"])
+                if s_start > cur_orig:
+                    gap_dur = s_start - cur_orig
+                    intervals.append({"t0": cur_orig, "t1": s_start, "mult": 1.0, "out_dur": gap_dur})
+                    new_timeline += gap_dur
+                    cur_orig = s_start
+
+                v_dur = max(0.2, s_end - s_start)
+                a_dur = audio_durs.get(seg["id"], v_dur)
+                if a_dur > v_dur:
+                    mult = a_dur / v_dur
+                    out_dur = a_dur
+                else:
+                    mult = 1.0
+                    out_dur = v_dur
+
+                intervals.append({"t0": s_start, "t1": s_end, "mult": mult, "out_dur": out_dur})
+                new_s = dict(seg)
+                new_s["start"] = round(new_timeline, 2)
+                new_s["end"] = round(new_timeline + out_dur, 2)
+                new_segments.append(new_s)
+                new_timeline += out_dur
+                cur_orig = s_end
+
+            if total_dur > cur_orig:
+                gap_dur = total_dur - cur_orig
+                intervals.append({"t0": cur_orig, "t1": total_dur, "mult": 1.0, "out_dur": gap_dur})
+                new_timeline += gap_dur
+
+            need_retime = any(abs(it["mult"] - 1.0) > 0.02 for it in intervals)
+            if need_retime and len(intervals) > 0:
+                report_progress(76, "Đang co giãn Video theo nhịp câu nói (giữ giọng 1.0x)...", force=True)
+                retime_script = os.path.join(work_dir, "retime_filter.txt")
+                N = len(intervals)
+                splits = ''.join(f'[v{i}]' for i in range(N))
+                f_lines = [f'[0:v]split={N}{splits}']
+                parts = []
+                for i, it in enumerate(intervals):
+                    t0, t1, mult = it["t0"], it["t1"], it["mult"]
+                    if abs(mult - 1.0) < 0.02:
+                        f_lines.append(f'[v{i}]trim={t0:.3f}:{t1:.3f},setpts=PTS-STARTPTS[p{i}]')
+                    else:
+                        f_lines.append(f'[v{i}]trim={t0:.3f}:{t1:.3f},setpts={mult:.4f}*(PTS-STARTPTS)[p{i}]')
+                    parts.append(f'[p{i}]')
+                joined_p = ''.join(parts)
+                f_lines.append(f'{joined_p}concat=n={N}:v=1:a=0[outv_retime]')
+                with open(retime_script, "w", encoding="utf-8") as rf:
+                    rf.write(";\n".join(f_lines))
+
+                retimed_mp4 = os.path.join(work_dir, "retimed_video.mp4")
+                cmd_ret = ["ffmpeg", "-y", "-i", "input_video.mp4", "-filter_complex_script", "retime_filter.txt", "-map", "[outv_retime]", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "retimed_video.mp4"]
+                p_ret = subprocess.run(cmd_ret, cwd=work_dir, capture_output=True, text=True)
+                if p_ret.returncode == 0 and os.path.exists(retimed_mp4) and os.path.getsize(retimed_mp4) > 1000:
+                    video_input_name = "retimed_video.mp4"
+                    vid_w, vid_h, total_dur, _ = probe_video_info(retimed_mp4)
+                    segments = new_segments
+
+            if has_audio:
+                try:
+                    orig_a = AudioSegment.from_file(video_path)
+                    if len(orig_a) < int(total_dur * 1000):
+                        orig_a = orig_a + AudioSegment.silent(duration=int(total_dur * 1000) - len(orig_a))
+                    master_a = AudioSegment.silent(duration=len(orig_a)) if orig_vol <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, orig_vol)))
+                except Exception:
+                    master_a = AudioSegment.silent(duration=int((total_dur + 2) * 1000))
+            else:
+                master_a = AudioSegment.silent(duration=int((total_dur + 2) * 1000))
+
+            for seg in segments:
+                clip = audio_clips.get(seg["id"])
+                if clip:
+                    pos_ms = int(seg["start"] * 1000)
+                    master_a = master_a.overlay(clip, position=pos_ms)
+            master_a.export(final_audio, format="wav")
+
+        # CHẾ ĐỘ 2: CO GIÃN GIỌNG ĐỌC ATEMPO (GIỮ NGUYÊN VIDEO)
         else:
-            master_a = AudioSegment.silent(duration=int((max(s["end"] for s in segments) + 2)*1000))
+            report_progress(72, "Đang đồng bộ tốc độ âm thanh khớp Timeline trên Cloud...", force=True)
+            def sync_one(seg):
+                c_path = os.path.join(tts_dir, f"s_{seg['id']}.wav")
+                if not os.path.exists(c_path):
+                    c_path = os.path.join(tts_dir, f"s_{seg['id']}.mp3")
+                if not os.path.exists(c_path): return None
+                s_ms, e_ms = int(seg["start"]*1000), int(seg["end"]*1000)
+                t_dur = max(300, e_ms - s_ms)
+                clip = AudioSegment.from_file(c_path)
+                if len(clip) > t_dur:
+                    ratio = min(1.85, len(clip) / t_dur)
+                    f_path = os.path.join(tts_dir, f"f_{seg['id']}.wav")
+                    subprocess.run(["ffmpeg", "-y", "-i", c_path, "-filter:a", f"atempo={ratio:.3f}", f_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if os.path.exists(f_path) and os.path.getsize(f_path) > 100:
+                        clip = AudioSegment.from_file(f_path)
+                return (s_ms, clip)
 
-        for pos_ms, clip in synced:
-            master_a = master_a.overlay(clip, position=pos_ms)
-        master_a.export(final_audio, format="adts")
+            synced = []
+            with ThreadPoolExecutor(max_workers=16) as ex:
+                for res in ex.map(sync_one, segments):
+                    if res: synced.append(res)
+
+            if has_audio:
+                orig_a = AudioSegment.from_file(video_path)
+                master_a = AudioSegment.silent(duration=len(orig_a)) if orig_vol <= 0.01 else orig_a.apply_gain(20 * math.log10(orig_vol))
+            else:
+                master_a = AudioSegment.silent(duration=int((max(s["end"] for s in segments) + 2)*1000))
+
+            for pos_ms, clip in synced:
+                master_a = master_a.overlay(clip, position=pos_ms)
+            master_a.export(final_audio, format="wav")
 
     # BƯỚC 4: RENDER VIDEO TRÊN CLOUD (KÈM SMARTBLUR + CHỮ MỜ DVD + LOGO)
     srt_path = os.path.join(work_dir, "sub_vi.srt")
@@ -1098,14 +1244,14 @@ def run_worker():
 
     render_mode = st.get("renderMode", "hybrid_gpu")
     if render_mode == "copy":
-        report_progress(85, "Đang đóng gói Stream Copy trên Cloud...")
-        cmd = ["ffmpeg", "-y", "-i", "input_video.mp4", "-i", "mixed_audio.aac", "-i", "sub_vi.srt", "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0", "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text", "-movflags", "+faststart", "output_vietsub.mp4"]
+        report_progress(85, "Đang đóng gói Stream Copy trên Cloud...", force=True)
+        cmd = ["ffmpeg", "-y", "-i", video_input_name, "-i", "mixed_audio.wav", "-i", "sub_vi.srt", "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-c:s", "mov_text", "-movflags", "+faststart", "output_vietsub.mp4"]
         subprocess.run(cmd, cwd=work_dir, check=True)
     else:
         test_nvenc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=128x128:d=0.1", "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True)
         use_nvenc = (test_nvenc.returncode == 0)
-        enc_label = "GPU T4 NVENC" if use_nvenc else "Cloud Multi-Core CPU"
-        report_progress(80, f"Đang Render Video bằng {enc_label} ({vid_w}x{vid_h})...")
+        enc_label = "GPU T4 NVENC" if use_nvenc else "Cloud Multi-Core CPU (Tốc độ cao)"
+        report_progress(80, f"Đang Render Video bằng {enc_label} ({vid_w}x{vid_h})...", force=True)
 
         br = st.get("blurRect", {"x":0,"y":0,"w":0,"h":0})
         bx, by = max(0, int(br.get("x",0))//2*2), max(0, int(br.get("y",0))//2*2)
@@ -1126,12 +1272,12 @@ def run_worker():
         has_valid_logo = bool(addon_cfg.get("logo_enabled") and os.path.exists(logo_path))
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"]
         if use_nvenc: cmd += ["-hwaccel", "cuda"]
-        cmd += ["-i", "input_video.mp4"]
+        cmd += ["-i", video_input_name]
 
         audio_input_idx = None
         next_idx = 1
         if enable_tts and os.path.exists(final_audio):
-            cmd += ["-i", "mixed_audio.aac"]
+            cmd += ["-i", "mixed_audio.wav"]
             audio_input_idx = next_idx
             next_idx += 1
 
@@ -1157,30 +1303,80 @@ def run_worker():
             cmd += ["-map", "0:a?"]
 
         if use_nvenc:
-            cmd += ["-c:v", "h264_nvenc", "-preset", "p2", "-rc", "vbr", "-cq", "21", "-pix_fmt", "yuv420p"]
+            cmd += ["-c:v", "h264_nvenc", "-preset", "p2", "-rc", "vbr", "-cq", "22", "-pix_fmt", "yuv420p"]
         else:
-            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "21", "-threads", "0", "-pix_fmt", "yuv420p"]
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "0", "-pix_fmt", "yuv420p"]
         cmd += ["-movflags", "+faststart", "-c:a", "aac", "-b:a", "192k", "output_vietsub.mp4"]
 
         proc = subprocess.Popen(cmd, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="ignore")
+        last_rep_t = 0.0
+        last_rep_pct = -1
         for line in proc.stdout:
-            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+            if line.startswith("out_time_us="):
                 try:
                     sec = int(line.strip().split("=")[1]) / 1_000_000.0
                     if total_dur > 0:
                         rp = min(99, int((sec / total_dur) * 100))
-                        report_progress(80 + int(rp * 0.14), f"Đang Render trên {enc_label} ({rp}%)...")
+                        pct_now = 80 + int(rp * 0.14)
+                        now_t = time.time()
+                        if (now_t - last_rep_t >= 3.0 or rp >= 98) and pct_now > last_rep_pct:
+                            last_rep_t = now_t
+                            last_rep_pct = pct_now
+                            report_progress(pct_now, f"Đang Render trên {enc_label} ({rp}%)...")
                 except Exception: pass
         proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"FFmpeg render thất bại với mã lỗi {proc.returncode}!")
+        if not os.path.exists(out_video) or os.path.getsize(out_video) < 1000:
+            raise RuntimeError("File video thành phẩm không tồn tại hoặc có kích thước 0 byte!")
 
-    # BƯỚC 5: GỬI VIDEO THÀNH PHẨM VỀ TRẠM TRUNG CHUYỂN & TỰ ĐỘNG TẮT PHIÊN CLOUD
-    report_progress(95, "Đang truyền Video thành phẩm về Trạm Trung Chuyển của bạn...")
-    with open(out_video, "rb") as vf_file:
-        files = {"video": ("output_vietsub.mp4", vf_file, "video/mp4")}
-        data = {"segments_json": json.dumps(segments, ensure_ascii=False)}
-        requests.post(f"{RELAY_URL}/api/relay/upload_result/{JOB_ID}", files=files, data=data, timeout=600)
+    # BƯỚC 5: GỬI VIDEO THÀNH PHẨM VỀ TRẠM TRUNG CHUYỂN (HỖ TRỢ CHUNK 8MB CHỐNG TIMEOUT/PROXY)
+    report_progress(95, "Đang truyền Video thành phẩm về Trạm Trung Chuyển của bạn...", force=True)
+    video_size = os.path.getsize(out_video)
+    chunk_size = 8 * 1024 * 1024  # 8MB per chunk
+    total_chunks = max(1, math.ceil(video_size / chunk_size))
+    seg_payload = json.dumps(segments, ensure_ascii=False)
 
-    report_progress(100, "Đã trả Video về Trạm Trung Chuyển! Đang tự động ngắt phiên Cloud...")
+    uploaded_ok = False
+    if total_chunks > 1:
+        try:
+            print(f"[*] Đang tải video lên Railway dạng cắt mảnh ({total_chunks} phần, mỗi phần 8MB)...", flush=True)
+            with open(out_video, "rb") as f_in:
+                for c_idx in range(total_chunks):
+                    chunk_bytes = f_in.read(chunk_size)
+                    files = {"chunk": (f"part_{c_idx:05d}.bin", chunk_bytes, "application/octet-stream")}
+                    data = {"chunk_index": c_idx, "total_chunks": total_chunks}
+                    if c_idx == total_chunks - 1:
+                        data["segments_json"] = seg_payload
+                    pct = 95 + int((c_idx / total_chunks) * 4)
+                    report_progress(pct, f"Đang truyền video về Trạm ({c_idx+1}/{total_chunks} phần)...", force=True)
+                    chunk_ok = False
+                    for retry in range(4):
+                        try:
+                            rc = requests.post(f"{RELAY_URL}/api/relay/upload_chunk/{JOB_ID}", files=files, data=data, timeout=120)
+                            if rc.status_code == 200:
+                                chunk_ok = True
+                                break
+                            else:
+                                print(f"[!] Mảnh {c_idx} lần thử {retry+1} trả về {rc.status_code}: {rc.text[:100]}", flush=True)
+                        except Exception as e_c:
+                            print(f"[!] Mảnh {c_idx} lần thử {retry+1} lỗi mạng: {e_c}", flush=True)
+                        time.sleep(2)
+                    if not chunk_ok:
+                        raise RuntimeError(f"Gửi mảnh video {c_idx+1}/{total_chunks} thất bại sau 4 lần thử!")
+            uploaded_ok = True
+        except Exception as e_chunk:
+            print(f"[!] Truyền dạng cắt mảnh gặp lỗi: {e_chunk}, chuyển sang gửi trực tiếp 1 lần...", flush=True)
+
+    if not uploaded_ok:
+        with open(out_video, "rb") as vf_file:
+            files = {"video": ("output_vietsub.mp4", vf_file, "video/mp4")}
+            data = {"segments_json": seg_payload}
+            r_up = requests.post(f"{RELAY_URL}/api/relay/upload_result/{JOB_ID}", files=files, data=data, timeout=600)
+            if r_up.status_code != 200:
+                raise RuntimeError(f"Trạm trung chuyển từ chối nhận video ({r_up.status_code}): {r_up.text[:300]}")
+
+    report_progress(100, "Đã trả Video về Trạm Trung Chuyển! Đang tự động ngắt phiên Cloud...", force=True)
 
     if GH_TOKEN and GH_CODESPACE:
         try:
@@ -1197,11 +1393,13 @@ if __name__ == "__main__":
         run_worker()
     except Exception as e:
         import traceback
-        err_detail = f"{str(e)} | {traceback.format_exc()[-300:]}"
+        err_detail = f"{str(e)} | {traceback.format_exc()[-400:]}"
+        print(f"[!] WORKER CRITICAL ERROR: {err_detail}", flush=True)
         try:
             requests.post(f"{RELAY_URL}/api/relay/fail/{JOB_ID}", json={"error": err_detail}, timeout=15)
         except Exception:
             pass
+        sys.exit(1)
     sys.exit(0)
 '''
 
@@ -1237,11 +1435,11 @@ def dispatch_kaggle_t4_worker(job_id):
         os.chmod(kaggle_json_path, 0o600)
 
     try:
-        import kaggle
         import six
-    except ImportError:
-        update_progress(4, "Đang cài đặt thư viện 'kaggle' & 'six'...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle>=1.6.14", "six>=1.16.0"])
+        import kaggle
+    except (ImportError, ModuleNotFoundError):
+        update_progress(4, "Đang chuẩn bị thư viện 'kaggle' & 'six'...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "six>=1.16.0", "kaggle>=1.6.14"], check=False)
 
     shutil.rmtree(KAGGLE_PUSH_DIR, ignore_errors=True)
     os.makedirs(KAGGLE_PUSH_DIR, exist_ok=True)
@@ -1281,7 +1479,11 @@ def dispatch_kaggle_t4_worker(job_id):
 
 def dispatch_github_vps_worker(job_id, relay_url=None):
     cfg = load_cloud_config()
-    token = cfg.get("github_token", "").strip()
+    token = cfg.get("github_token", "").strip().strip("'\"")
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    elif token.lower().startswith("token "):
+        token = token[6:].strip()
     repo = cfg.get("github_repo", "").strip()
 
     if not token or "/" not in repo:
@@ -1347,6 +1549,14 @@ jobs:
         run: |
           curl -sSL "${{ github.event.inputs.relay_url }}/api/relay/job/${{ github.event.inputs.job_id }}/worker.py" -o worker.py
           python worker.py
+      - name: Archive Completed Video as GitHub Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nexus-video-${{ github.event.inputs.job_id }}
+          path: nexus_cloud_work/output_vietsub.mp4
+          if-no-files-found: ignore
+          retention-days: 7
 """
     wf_api_url = f"https://api.github.com/repos/{repo}/contents/{wf_path}"
     existing_wf = requests.get(wf_api_url, headers=headers, timeout=15)
@@ -2224,6 +2434,25 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
+                    <!-- KHỚP TỐC ĐỘ VIDEO & GIỌNG ĐỌC TỰ NHIÊN -->
+                    <div class="studio-card rounded-xl p-3.5 space-y-2 border border-purple-500/40 bg-purple-950/20">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-extrabold text-purple-400 uppercase flex items-center gap-1.5">
+                                <i class="fa-solid fa-wand-magic-sparkles"></i> Đồng Bộ Tốc Độ Video & Giọng Nói
+                            </span>
+                            <span class="text-[10px] bg-purple-500/30 text-purple-200 px-2 py-0.5 rounded-full font-bold">Chuẩn Studio AI</span>
+                        </div>
+                        <p class="text-[11px] text-slate-300 leading-relaxed">
+                            Khắc phục triệt để tình trạng giọng bị méo/nói quá nhanh: tự động co giãn hình ảnh video theo từng câu nói!
+                        </p>
+                        <div>
+                            <select id="syncMode" class="w-full bg-slate-950 border border-purple-500/50 rounded-lg px-2.5 py-2 text-xs font-bold text-emerald-300 outline-none">
+                                <option value="retime_video" selected>🌟 Co giãn Video theo câu nói (Giữ giọng đọc 1.0x tự nhiên 100%)</option>
+                                <option value="atempo_audio">⚡ Co giãn giọng đọc (Tua nhanh giọng atempo - Giữ nguyên video)</option>
+                            </select>
+                        </div>
+                    </div>
+
                     <div class="studio-card rounded-xl p-3.5 space-y-3">
                         <span class="text-xs font-bold text-sky-400 uppercase block"><i class="fa-solid fa-sliders mr-1.5"></i>Chế Độ Render Video</span>
                         <div>
@@ -2497,6 +2726,12 @@ HTML_TEMPLATE = """
                         <label class="text-[11px] text-slate-300">Tên Kernel Worker (Tự tạo)</label>
                         <input type="text" id="cfg_kaggle_slug" autocomplete="off" value="nexus-vietsub-worker" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 mono outline-none"/>
                     </div>
+                    <div class="pt-1">
+                        <button type="button" onclick="testKaggleConnection()" id="btnTestKaggle" class="w-full py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 text-[11px] font-bold border border-sky-500/30 flex items-center justify-center gap-1.5 transition">
+                            <i class="fa-solid fa-plug-circle-check"></i> Kiểm Tra Kết Nối Kaggle
+                        </button>
+                        <div id="kaggleTestResult" class="text-[11px] mt-1.5 hidden leading-tight p-2 rounded-lg bg-slate-950 border border-slate-800"></div>
+                    </div>
                 </div>
 
                 <div class="studio-card rounded-xl p-3.5 space-y-3">
@@ -2515,6 +2750,12 @@ HTML_TEMPLATE = """
                     <div>
                         <label class="text-[11px] text-slate-300">Tên GitHub Codespace (Tùy chọn)</label>
                         <input type="text" id="cfg_gh_codespace" autocomplete="off" placeholder="Để trống nếu dùng GitHub Actions VPS 6h tự động" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 mono outline-none"/>
+                    </div>
+                    <div class="pt-1">
+                        <button type="button" onclick="testGithubConnection()" id="btnTestGithub" class="w-full py-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 text-[11px] font-bold border border-purple-500/30 flex items-center justify-center gap-1.5 transition">
+                            <i class="fa-solid fa-plug-circle-check"></i> Kiểm Tra Kết Nối GitHub
+                        </button>
+                        <div id="githubTestResult" class="text-[11px] mt-1.5 hidden leading-tight p-2 rounded-lg bg-slate-950 border border-slate-800"></div>
                     </div>
                 </div>
             </div>
@@ -2879,6 +3120,76 @@ HTML_TEMPLATE = """
             setStatus(100, "Đã lưu cấu hình Cloud Worker (Kaggle T4 & GitHub VPS 6h)!");
         }
 
+        async function testGithubConnection() {
+            const btn = document.getElementById('btnTestGithub');
+            const resDiv = document.getElementById('githubTestResult');
+            let token = document.getElementById('cfg_gh_token').value.trim();
+            const repo = document.getElementById('cfg_gh_repo').value.trim();
+            if (!token) {
+                alert("Vui lòng nhập GitHub Personal Access Token trước!");
+                return;
+            }
+            btn.disabled = true;
+            resDiv.className = "text-[11px] mt-1.5 text-amber-400 font-semibold p-2 rounded-lg bg-slate-950 border border-slate-800";
+            resDiv.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang kết nối thử tới GitHub REST API...';
+            resDiv.classList.remove('hidden');
+            try {
+                const resp = await fetch('/api/cloud/test_github', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({github_token: token, github_repo: repo})
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    resDiv.className = "text-[11px] mt-1.5 text-emerald-400 font-bold p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/30";
+                    resDiv.innerHTML = '<i class="fa-solid fa-circle-check mr-1 text-emerald-400"></i> ' + data.message;
+                } else {
+                    resDiv.className = "text-[11px] mt-1.5 text-rose-300 font-medium p-2 rounded-lg bg-rose-950/40 border border-rose-500/30";
+                    resDiv.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1 text-rose-400"></i> ' + data.message;
+                }
+            } catch (e) {
+                resDiv.className = "text-[11px] mt-1.5 text-rose-400 font-bold p-2 rounded-lg bg-rose-950/40 border border-rose-500/30";
+                resDiv.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1"></i> Lỗi kết nối mạng: ' + e.message;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function testKaggleConnection() {
+            const btn = document.getElementById('btnTestKaggle');
+            const resDiv = document.getElementById('kaggleTestResult');
+            const username = document.getElementById('cfg_kaggle_user').value.trim();
+            const key = document.getElementById('cfg_kaggle_key').value.trim();
+            if (!username || !key) {
+                alert("Vui lòng nhập Kaggle Username và API Key trước!");
+                return;
+            }
+            btn.disabled = true;
+            resDiv.className = "text-[11px] mt-1.5 text-amber-400 font-semibold p-2 rounded-lg bg-slate-950 border border-slate-800";
+            resDiv.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang kết nối thử tới Kaggle API...';
+            resDiv.classList.remove('hidden');
+            try {
+                const resp = await fetch('/api/cloud/test_kaggle', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({kaggle_username: username, kaggle_key: key})
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    resDiv.className = "text-[11px] mt-1.5 text-emerald-400 font-bold p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/30";
+                    resDiv.innerHTML = '<i class="fa-solid fa-circle-check mr-1 text-emerald-400"></i> ' + data.message;
+                } else {
+                    resDiv.className = "text-[11px] mt-1.5 text-rose-300 font-medium p-2 rounded-lg bg-rose-950/40 border border-rose-500/30";
+                    resDiv.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1 text-rose-400"></i> ' + data.message;
+                }
+            } catch (e) {
+                resDiv.className = "text-[11px] mt-1.5 text-rose-400 font-bold p-2 rounded-lg bg-rose-950/40 border border-rose-500/30";
+                resDiv.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1"></i> Lỗi kết nối mạng: ' + e.message;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
         async function stopCloudJob() {
             await fetch('/api/cloud/cancel', { method: 'POST' });
             document.getElementById('btnStopCloud').classList.add('hidden');
@@ -3234,6 +3545,7 @@ HTML_TEMPLATE = """
                 marginV: parseInt(document.getElementById('marginV').value || 28),
                 pronounRule: getActivePronounRule(),
                 contextGlossary: document.getElementById('contextGlossary').value || '',
+                syncMode: document.getElementById('syncMode') ? document.getElementById('syncMode').value : 'retime_video',
                 enableTts: document.getElementById('enableTts').checked,
                 ttsVoice: document.getElementById('ttsVoice').value || 'piper:vi_VN-vais1000-medium',
                 ttsThreads: parseInt(document.getElementById('ttsThreads').value || 16),
@@ -3285,6 +3597,7 @@ HTML_TEMPLATE = """
             if (st.outlineWidth !== undefined) document.getElementById('outlineWidth').value = st.outlineWidth;
             if (st.marginV !== undefined) document.getElementById('marginV').value = st.marginV;
             if (st.contextGlossary !== undefined) document.getElementById('contextGlossary').value = st.contextGlossary;
+            if (st.syncMode && document.getElementById('syncMode')) document.getElementById('syncMode').value = st.syncMode;
             if (st.enableTts !== undefined) document.getElementById('enableTts').checked = st.enableTts;
             if (st.ttsVoice) document.getElementById('ttsVoice').value = st.ttsVoice;
             if (st.origVolume !== undefined) {
@@ -4271,7 +4584,12 @@ HTML_TEMPLATE = """
                         document.getElementById('statusSpinner').classList.add('hidden');
                         document.getElementById('btnAutoAll').disabled = false;
                         document.getElementById('btnAutoAll').classList.remove('opacity-60', 'cursor-not-allowed');
-                        const errDesc = data.error || data.message || "Đã xảy ra sự cố trong quá trình xử lý 24/7 trên máy chủ.";
+                        let errDesc = "Đã xảy ra sự cố trong quá trình xử lý 24/7 trên máy chủ.";
+                        if (data && data.error && data.error !== 'undefined') {
+                            errDesc = typeof data.error === 'object' ? JSON.stringify(data.error) : String(data.error);
+                        } else if (data && data.message && data.message !== 'undefined') {
+                            errDesc = typeof data.message === 'object' ? JSON.stringify(data.message) : String(data.message);
+                        }
                         alert("Tiến trình 24/7 gặp lỗi: " + errDesc);
                         if (errDesc.includes("Kaggle") || errDesc.includes("GitHub") || errDesc.includes("401") || errDesc.includes("Token") || errDesc.includes("credentials") || errDesc.includes("Cấu Hình Cloud")) {
                             openCloudModal();
@@ -4347,7 +4665,10 @@ HTML_TEMPLATE = """
 
                         showToast("🎉 Tiến trình 24/7 đã hoàn tất trong lúc bạn rời trang web/tắt máy! Video đã sẵn sàng xem & tải về.", 8000);
                     } else if (job.status === 'error') {
-                        setStatus(0, "Lỗi tiến trình 24/7: " + (job.error || "Không rõ nguyên nhân"));
+                        let jErr = "Đã xảy ra sự cố trong quá trình xử lý 24/7.";
+                        if (job && job.error && job.error !== 'undefined') jErr = typeof job.error === 'object' ? JSON.stringify(job.error) : String(job.error);
+                        else if (job && job.message && job.message !== 'undefined') jErr = typeof job.message === 'object' ? JSON.stringify(job.message) : String(job.message);
+                        setStatus(0, "Lỗi tiến trình 24/7: " + jErr);
                         const btn = document.getElementById('btnAutoAll');
                         if (btn) {
                             btn.disabled = false;
@@ -4647,6 +4968,70 @@ def api_cloud_config():
         return jsonify(saved)
     return jsonify(load_cloud_config())
 
+@app.route("/api/cloud/test_github", methods=["POST"])
+def api_cloud_test_github():
+    data = request.json or {}
+    token = data.get("github_token", "").strip().strip("'\"")
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    elif token.lower().startswith("token "):
+        token = token[6:].strip()
+    repo = data.get("github_repo", "").strip()
+
+    if not token:
+        return jsonify({"ok": False, "message": "Chưa nhập GitHub Personal Access Token!"})
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    try:
+        r = requests.get("https://api.github.com/user", headers=headers, timeout=12)
+        if r.status_code == 401:
+            return jsonify({
+                "ok": False,
+                "message": "GitHub báo lỗi 401 (Bad credentials): Token này không đúng, đã hết hạn, hoặc đã bị GitHub thu hồi do vô tình dán vào file code đẩy lên Git! Hãy tạo Token Classic mới (tích quyền 'repo' và 'workflow')."
+            })
+        if r.status_code != 200:
+            return jsonify({"ok": False, "message": f"GitHub API trả về mã lỗi {r.status_code}: {r.text}"})
+
+        user_info = r.json()
+        gh_user = user_info.get("login", "Unknown")
+
+        repo_info = ""
+        if repo and "/" in repo:
+            rr = requests.get(f"https://api.github.com/repos/{repo}", headers=headers, timeout=12)
+            if rr.status_code == 200:
+                repo_info = f" và tìm thấy Repo '{repo}' (Sẵn sàng chạy 24/7)!"
+            elif rr.status_code == 404:
+                repo_info = f", nhưng chưa có Repo '{repo}' (tool sẽ tự động tạo repo này khi bấm Tự Động A-Z)!"
+            elif rr.status_code == 403:
+                repo_info = f", nhưng Token không đủ quyền truy cập Repo '{repo}' (hãy đảm bảo đã tích quyền 'repo' và 'workflow')!"
+
+        return jsonify({"ok": True, "message": f"Kết nối GitHub thành công! Tài khoản: @{gh_user}{repo_info}"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"Lỗi kết nối tới máy chủ GitHub: {str(e)}"})
+
+@app.route("/api/cloud/test_kaggle", methods=["POST"])
+def api_cloud_test_kaggle():
+    data = request.json or {}
+    username = data.get("kaggle_username", "").strip()
+    key = data.get("kaggle_key", "").strip()
+    if not username or not key:
+        return jsonify({"ok": False, "message": "Chưa nhập Kaggle Username hoặc API Key!"})
+
+    try:
+        r = requests.get("https://www.kaggle.com/api/v1/datasets/list?pageSize=1", auth=(username, key), timeout=12)
+        if r.status_code == 200:
+            return jsonify({"ok": True, "message": f"Kết nối Kaggle thành công! Tài khoản: @{username} (Sẵn sàng kích hoạt GPU T4)"})
+        elif r.status_code in (401, 403):
+            return jsonify({"ok": False, "message": f"Kaggle từ chối xác thực ({r.status_code})! API Key hoặc Username không đúng."})
+        else:
+            return jsonify({"ok": False, "message": f"Kaggle trả về mã {r.status_code}: {r.text}"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"Lỗi kết nối tới máy chủ Kaggle: {str(e)}"})
+
 @app.route("/api/cloud/dispatch", methods=["POST"])
 def api_cloud_dispatch():
     data = request.json or {}
@@ -4834,6 +5219,73 @@ def api_relay_complete_transcribe(job_id):
             pass
 
     return jsonify({"status": "ok"})
+
+@app.route("/api/relay/upload_chunk/<job_id>", methods=["POST"])
+def api_relay_upload_chunk(job_id):
+    chunk_index = int(request.form.get("chunk_index", 0))
+    total_chunks = int(request.form.get("total_chunks", 1))
+    chunk_file = request.files.get("chunk")
+    if not chunk_file:
+        return jsonify({"error": "Missing chunk"}), 400
+
+    chunk_dir = os.path.join(TEMP_DIR, f"chunks_{job_id}")
+    os.makedirs(chunk_dir, exist_ok=True)
+    part_path = os.path.join(chunk_dir, f"part_{chunk_index:05d}.bin")
+    chunk_file.save(part_path)
+
+    parts = sorted([p for p in os.listdir(chunk_dir) if p.startswith("part_")])
+    if len(parts) == total_chunks:
+        out_path = os.path.join(TEMP_DIR, "output_vietsub.mp4")
+        with open(out_path, "wb") as f_out:
+            for p in parts:
+                p_full = os.path.join(chunk_dir, p)
+                with open(p_full, "rb") as f_in:
+                    shutil.copyfileobj(f_in, f_out, 1024 * 1024)
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+
+        job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        job_out = os.path.join(job_dir, "output_vietsub.mp4")
+        try:
+            shutil.copy2(out_path, job_out)
+        except Exception:
+            pass
+
+        segs = []
+        seg_json = request.form.get("segments_json")
+        if seg_json:
+            try:
+                segs = json.loads(seg_json)
+                ACTIVE_CLOUD_JOB["segments"] = segs
+                generate_vtt_file(os.path.join(TEMP_DIR, "sub_vi.vtt"), segs)
+            except Exception:
+                pass
+
+        ACTIVE_CLOUD_JOB["output_ready"] = True
+        ACTIVE_CLOUD_JOB["status"] = "completed"
+        update_progress(100, "🎉 Đã nhận đầy đủ Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!")
+
+        out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
+        with SERVER_JOBS_LOCK:
+            job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
+            job["percent"] = 100
+            job["status"] = "completed"
+            job["step"] = "done"
+            job["output_url"] = out_url
+            job["updated_at"] = datetime.now().isoformat()
+            if segs:
+                job["segments"] = segs
+            job["message"] = "🎉 Tiến trình 24/7 hoàn tất! Video đã được xử lý xong và lưu trữ sẵn sàng tải về."
+            ACTIVE_SERVER_JOBS[job_id] = job
+            try:
+                with open(os.path.join(job_dir, "state.json"), "w", encoding="utf-8") as f:
+                    json.dump(job, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        return jsonify({"status": "completed", "assembled": True})
+
+    return jsonify({"status": "chunk_received", "received": len(parts), "total": total_chunks})
 
 @app.route("/api/relay/upload_result/<job_id>", methods=["POST"])
 def api_relay_upload_result(job_id):
@@ -5747,49 +6199,146 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
 
             if not os.path.exists(cfile):
                 return None
-            s_ms, e_ms = int(seg["start"] * 1000), int(seg["end"] * 1000)
-            t_dur = max(300, e_ms - s_ms)
-            clip = AudioSegment.from_file(cfile)
-            if len(clip) > t_dur:
-                ratio = min(1.85, len(clip) / t_dur)
-                f_path = os.path.join(cache_dir, f"{ckey}_{t_dur}.mp3")
-                if not (reuse_audio_cache and os.path.exists(f_path)):
-                    subprocess.run(["ffmpeg", "-y", "-i", cfile, "-filter:a", f"atempo={ratio:.3f}", f_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if os.path.exists(f_path):
-                    clip = AudioSegment.from_file(f_path)
-            return (s_ms, clip)
+            try:
+                clip = AudioSegment.from_file(cfile)
+                return (seg["id"], clip, len(clip) / 1000.0)
+            except Exception:
+                return None
 
-        synced = []
+        sync_mode = settings.get("syncMode", "retime_video")
+        audio_clips = {}
+        audio_durs = {}
+        synced_results = []
         with ThreadPoolExecutor(max_workers=max(4, min(16, tts_threads))) as ex:
             for res in ex.map(make_one_audio, segments):
                 if res:
-                    synced.append(res)
+                    synced_results.append(res)
+                    audio_clips[res[0]] = res[1]
+                    audio_durs[res[0]] = res[2]
 
-        orig_a = None
-        if has_audio_stream(video_path):
-            try:
-                orig_a = AudioSegment.from_file(video_path)
-            except Exception as e_a:
-                print(f"[!] Chú ý: Không đọc được audio gốc bằng pydub ({e_a}), bỏ qua audio gốc.", flush=True)
-                orig_a = None
+        if sync_mode == "retime_video" and audio_clips:
+            progress_cb(62, "Đang tính toán co giãn Video theo giọng đọc tự nhiên 1.0x...")
+            intervals = []
+            cur_orig = 0.0
+            new_timeline = 0.0
+            new_segments = []
 
-        if orig_a is not None and len(orig_a) > 0:
-            vol_mult = orig_volume / 100.0 if orig_volume > 1.0 else orig_volume
-            master_a = AudioSegment.silent(duration=len(orig_a)) if vol_mult <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, vol_mult)))
+            for seg in segments:
+                s_start, s_end = float(seg["start"]), float(seg["end"])
+                if s_start > cur_orig:
+                    gap_dur = s_start - cur_orig
+                    intervals.append({"t0": cur_orig, "t1": s_start, "mult": 1.0, "out_dur": gap_dur})
+                    new_timeline += gap_dur
+                    cur_orig = s_start
+
+                v_dur = max(0.2, s_end - s_start)
+                a_dur = audio_durs.get(seg["id"], v_dur)
+                if a_dur > v_dur:
+                    mult = a_dur / v_dur
+                    out_dur = a_dur
+                else:
+                    mult = 1.0
+                    out_dur = v_dur
+
+                intervals.append({"t0": s_start, "t1": s_end, "mult": mult, "out_dur": out_dur})
+                new_s = dict(seg)
+                new_s["start"] = round(new_timeline, 2)
+                new_s["end"] = round(new_timeline + out_dur, 2)
+                new_segments.append(new_s)
+                new_timeline += out_dur
+                cur_orig = s_end
+
+            if total_dur > cur_orig:
+                gap_dur = total_dur - cur_orig
+                intervals.append({"t0": cur_orig, "t1": total_dur, "mult": 1.0, "out_dur": gap_dur})
+                new_timeline += gap_dur
+
+            need_retime = any(abs(it["mult"] - 1.0) > 0.02 for it in intervals)
+            if need_retime and len(intervals) > 0:
+                progress_cb(65, "Đang khớp chuyển động Video theo nhịp câu nói...")
+                retime_script = os.path.join(work_dir, "retime_filter.txt")
+                N = len(intervals)
+                splits = ''.join(f'[v{i}]' for i in range(N))
+                f_lines = [f'[0:v]split={N}{splits}']
+                parts = []
+                for i, it in enumerate(intervals):
+                    t0, t1, mult = it["t0"], it["t1"], it["mult"]
+                    if abs(mult - 1.0) < 0.02:
+                        f_lines.append(f'[v{i}]trim={t0:.3f}:{t1:.3f},setpts=PTS-STARTPTS[p{i}]')
+                    else:
+                        f_lines.append(f'[v{i}]trim={t0:.3f}:{t1:.3f},setpts={mult:.4f}*(PTS-STARTPTS)[p{i}]')
+                    parts.append(f'[p{i}]')
+                joined_p = ''.join(parts)
+                f_lines.append(f'{joined_p}concat=n={N}:v=1:a=0[outv_retime]')
+                with open(retime_script, "w", encoding="utf-8") as rf:
+                    rf.write(";\n".join(f_lines))
+
+                retimed_mp4 = os.path.join(work_dir, "retimed_video.mp4")
+                cmd_ret = ["ffmpeg", "-y", "-i", video_path, "-filter_complex_script", retime_script, "-map", "[outv_retime]", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", retimed_mp4]
+                p_ret = subprocess.run(cmd_ret, capture_output=True, text=True)
+                if p_ret.returncode == 0 and os.path.exists(retimed_mp4) and os.path.getsize(retimed_mp4) > 1000:
+                    video_path = retimed_mp4
+                    vid_w, vid_h, total_dur = get_video_info(video_path)
+                    segments = new_segments
+                    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang)
+                    inject_dvd_bouncing_text_into_ass(ass_path, vid_w, vid_h, total_dur, ADDON_SETTINGS)
+
+            orig_a = None
+            if has_audio_stream(video_path):
+                try:
+                    orig_a = AudioSegment.from_file(video_path)
+                    if len(orig_a) < int(total_dur * 1000):
+                        orig_a = orig_a + AudioSegment.silent(duration=int(total_dur * 1000) - len(orig_a))
+                except Exception:
+                    orig_a = None
+
+            if orig_a is not None and len(orig_a) > 0:
+                vol_mult = orig_volume / 100.0 if orig_volume > 1.0 else orig_volume
+                master_a = AudioSegment.silent(duration=len(orig_a)) if vol_mult <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, vol_mult)))
+            else:
+                master_a = AudioSegment.silent(duration=int((total_dur + 2) * 1000))
+
+            for seg in segments:
+                clip = audio_clips.get(seg["id"])
+                if clip:
+                    pos_ms = int(seg["start"] * 1000)
+                    master_a = master_a.overlay(clip, position=pos_ms)
+            master_a.export(final_audio_path, format="wav")
+
         else:
-            max_end = max((s.get("end", 0.0) for s in segments), default=0.0)
-            master_a = AudioSegment.silent(duration=int((max_end + 2) * 1000))
+            synced = []
+            for seg in segments:
+                clip = audio_clips.get(seg["id"])
+                if not clip: continue
+                s_ms, e_ms = int(seg["start"] * 1000), int(seg["end"] * 1000)
+                t_dur = max(300, e_ms - s_ms)
+                if len(clip) > t_dur:
+                    ratio = min(1.85, len(clip) / t_dur)
+                    ckey = get_tts_cache_key(tts_voice, (seg.get("trans") or seg.get("text") or "").strip())
+                    f_path = os.path.join(cache_dir, f"{ckey}_{t_dur}.mp3")
+                    if not (reuse_audio_cache and os.path.exists(f_path)):
+                        subprocess.run(["ffmpeg", "-y", "-i", os.path.join(cache_dir, f"{ckey}.mp3"), "-filter:a", f"atempo={ratio:.3f}", f_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if os.path.exists(f_path):
+                        clip = AudioSegment.from_file(f_path)
+                synced.append((s_ms, clip))
 
-        for pos_ms, clip in synced:
-            master_a = master_a.overlay(clip, position=pos_ms)
-        try:
-            master_a.export(final_audio_path, format="adts")
-        except Exception as e_exp:
-            print(f"[!] Lỗi export AAC audio ({e_exp}), thử định dạng mp3...", flush=True)
-            try:
-                master_a.export(final_audio_path, format="mp3")
-            except Exception:
-                pass
+            orig_a = None
+            if has_audio_stream(video_path):
+                try:
+                    orig_a = AudioSegment.from_file(video_path)
+                except Exception as e_a:
+                    orig_a = None
+
+            if orig_a is not None and len(orig_a) > 0:
+                vol_mult = orig_volume / 100.0 if orig_volume > 1.0 else orig_volume
+                master_a = AudioSegment.silent(duration=len(orig_a)) if vol_mult <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, vol_mult)))
+            else:
+                max_end = max((s.get("end", 0.0) for s in segments), default=0.0)
+                master_a = AudioSegment.silent(duration=int((max_end + 2) * 1000))
+
+            for pos_ms, clip in synced:
+                master_a = master_a.overlay(clip, position=pos_ms)
+            master_a.export(final_audio_path, format="wav")
 
     # Render video
     if render_mode == "copy":
