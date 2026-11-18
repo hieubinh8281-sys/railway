@@ -444,9 +444,9 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
         <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
             <div>
                 <h1 class="text-xl font-black tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-pink-400 to-sky-400 flex items-center gap-2">
-                    <i class="fa-solid fa-crown text-amber-400"></i> NEXUS STUDIO // LICENSE ADMIN
+                    <i class="fa-solid fa-crown text-amber-400"></i> NEXUS STUDIO // LICENSE & WORKSPACE ADMIN
                 </h1>
-                <p class="text-xs text-slate-400 mt-0.5">Bảng điều khiển cấp phát Key, khóa thiết bị & quản lý khách hàng</p>
+                <p class="text-xs text-slate-400 mt-0.5">Bảng điều khiển Quản trị Bản quyền, Giám sát Workspace & Video Khách hàng</p>
             </div>
             <div class="flex items-center gap-2">
                 <button onclick="openCreateModal()" class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:brightness-110 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition">
@@ -461,79 +461,142 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- THỐNG KÊ NHANH -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div class="admin-card rounded-xl p-4">
-                <div class="text-xs text-slate-400">Tổng Số Key Đã Bán</div>
-                <div id="statTotal" class="text-2xl font-black text-white mt-1">0</div>
-            </div>
-            <div class="admin-card rounded-xl p-4">
-                <div class="text-xs text-slate-400">Key Đang Hoạt Động</div>
-                <div id="statActive" class="text-2xl font-black text-emerald-400 mt-1">0</div>
-            </div>
-            <div class="admin-card rounded-xl p-4">
-                <div class="text-xs text-slate-400">Key Đã Bị Khóa/Thu Hồi</div>
-                <div id="statRevoked" class="text-2xl font-black text-rose-400 mt-1">0</div>
-            </div>
-            <div class="admin-card rounded-xl p-4">
-                <div class="text-xs text-slate-400">Key Đã Hết Hạn</div>
-                <div id="statExpired" class="text-2xl font-black text-amber-400 mt-1">0</div>
-            </div>
+        <!-- TAB CHUYỂN ĐỔI CHẾ ĐỘ QUẢN TRỊ -->
+        <div class="flex items-center gap-2 p-1.5 bg-slate-950 rounded-2xl border border-slate-800 w-fit">
+            <button onclick="switchAdminTab('keys')" id="tabBtn_keys" class="px-5 py-2.5 rounded-xl text-xs font-black transition flex items-center gap-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg shadow-purple-500/20">
+                <i class="fa-solid fa-key"></i> 1. Quản Lý Bản Quyền Key
+            </button>
+            <button onclick="switchAdminTab('workspaces')" id="tabBtn_workspaces" class="px-5 py-2.5 rounded-xl text-xs font-bold transition flex items-center gap-2 text-slate-400 hover:text-white">
+                <i class="fa-solid fa-building-user"></i> 2. Quản Lý Workspace & Video Khách Hàng
+            </button>
         </div>
 
-        <!-- BẢNG DANH SÁCH KEY -->
-        <div class="admin-card rounded-2xl overflow-hidden border border-slate-800">
-            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
-                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                    <i class="fa-solid fa-list-check text-purple-400"></i> Danh Sách Key Đã Phát Hành
-                </h3>
-                <button onclick="loadKeysList()" class="text-xs text-sky-400 hover:underline flex items-center gap-1">
-                    <i class="fa-solid fa-rotate"></i> Làm mới
-                </button>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs">
-                    <thead class="bg-slate-950 text-slate-400 border-b border-slate-800">
-                        <tr>
-                            <th class="py-3 px-3">Mã License Key</th>
-                            <th class="py-3 px-3">Khách Hàng</th>
-                            <th class="py-3 px-3 text-center">Gói (Tier)</th>
-                            <th class="py-3 px-3 text-center">Hạn Mức (Quota)</th>
-                            <th class="py-3 px-3">Thời Hạn</th>
-                            <th class="py-3 px-3">Khóa Máy (HWID)</th>
-                            <th class="py-3 px-3">Trạng Thái</th>
-                            <th class="py-3 px-3 text-center">Hành Động</th>
-                        </tr>
-                    </thead>
-                    <tbody id="keysTableBody" class="divide-y divide-slate-800/60">
-                        <tr><td colspan="8" class="py-8 text-center text-slate-500">Đang tải danh sách key...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- THẺ ĐẶC BIỆT DÀNH CHO ADMIN: ĐÓNG GÓI & DEPLOY RAILWAY 24/7 -->
-        <div class="admin-card rounded-2xl p-5 border border-sky-500/30 space-y-3 bg-gradient-to-br from-sky-950/40 to-indigo-950/30">
-            <div class="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                    <h3 class="text-sm font-bold text-sky-400 flex items-center gap-2">
-                        <i class="fa-solid fa-cloud-arrow-up"></i> ĐÓNG GÓI & TRIỂN KHAI LÊN RAILWAY 24/7
-                    </h3>
-                    <p class="text-xs text-slate-400 mt-0.5">Tạo bộ file Dockerfile, railway.json, requirements.txt, .dockerignore để đưa tool lên Railway chạy online 24/7</p>
+        <!-- TAB 1: QUẢN LÝ LICENSE KEYS -->
+        <div id="viewTab_keys" class="space-y-6">
+            <!-- THỐNG KÊ NHANH -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Tổng Số Key Đã Bán</div>
+                    <div id="statTotal" class="text-2xl font-black text-white mt-1">0</div>
                 </div>
-                <button onclick="generateRailwayFiles()" id="btnGenerateRailway" class="px-4 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:brightness-110 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-sky-500/20 transition">
-                    <i class="fa-solid fa-file-export"></i> Tạo Bộ File Deploy Railway
-                </button>
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Key Đang Hoạt Động</div>
+                    <div id="statActive" class="text-2xl font-black text-emerald-400 mt-1">0</div>
+                </div>
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Key Đã Bị Khóa/Thu Hồi</div>
+                    <div id="statRevoked" class="text-2xl font-black text-rose-400 mt-1">0</div>
+                </div>
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Key Đã Hết Hạn</div>
+                    <div id="statExpired" class="text-2xl font-black text-amber-400 mt-1">0</div>
+                </div>
             </div>
-            <div id="railwayResultBox" class="hidden text-xs bg-slate-950/90 border border-sky-500/40 rounded-xl p-3.5 space-y-2 text-slate-300">
-                <div class="text-emerald-400 font-bold flex items-center gap-1.5"><i class="fa-solid fa-circle-check"></i> <span id="railwayMsgText"></span></div>
-                <div class="text-[11px] text-slate-400 leading-relaxed space-y-1">
-                    <p><b>Hướng dẫn 3 bước đưa lên Railway:</b></p>
-                    <ol class="list-decimal list-inside space-y-0.5 text-slate-300">
-                        <li>Bộ file <code>Dockerfile</code>, <code>railway.json</code>, <code>requirements.txt</code> đã được tạo sẵn trong thư mục dự án.</li>
-                        <li>Đẩy (Push / Commit) toàn bộ thư mục này lên GitHub repository của bạn.</li>
-                        <li>Mở <a href="https://railway.app" target="_blank" class="text-sky-400 underline font-bold">Railway.app</a>, tạo New Project ➔ <b>Deploy from GitHub repo</b>. Railway sẽ tự động dựng web và cấp tên miền chạy 24/7!</li>
-                    </ol>
+
+            <!-- BẢNG DANH SÁCH KEY -->
+            <div class="admin-card rounded-2xl overflow-hidden border border-slate-800">
+                <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                        <i class="fa-solid fa-list-check text-purple-400"></i> Danh Sách Key Đã Phát Hành
+                    </h3>
+                    <button onclick="loadKeysList()" class="text-xs text-sky-400 hover:underline flex items-center gap-1">
+                        <i class="fa-solid fa-rotate"></i> Làm mới
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-slate-950 text-slate-400 border-b border-slate-800">
+                            <tr>
+                                <th class="py-3 px-3">Mã License Key</th>
+                                <th class="py-3 px-3">Khách Hàng</th>
+                                <th class="py-3 px-3 text-center">Gói (Tier)</th>
+                                <th class="py-3 px-3 text-center">Hạn Mức (Quota)</th>
+                                <th class="py-3 px-3">Thời Hạn</th>
+                                <th class="py-3 px-3">Khóa Máy (HWID)</th>
+                                <th class="py-3 px-3">Trạng Thái</th>
+                                <th class="py-3 px-3 text-center">Hành Động</th>
+                            </tr>
+                        </thead>
+                        <tbody id="keysTableBody" class="divide-y divide-slate-800/60">
+                            <tr><td colspan="8" class="py-8 text-center text-slate-500">Đang tải danh sách key...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- THẺ ĐẶC BIỆT DÀNH CHO ADMIN: ĐÓNG GÓI & DEPLOY RAILWAY 24/7 -->
+            <div class="admin-card rounded-2xl p-5 border border-sky-500/30 space-y-3 bg-gradient-to-br from-sky-950/40 to-indigo-950/30">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h3 class="text-sm font-bold text-sky-400 flex items-center gap-2">
+                            <i class="fa-solid fa-cloud-arrow-up"></i> ĐÓNG GÓI & TRIỂN KHAI LÊN RAILWAY 24/7
+                        </h3>
+                        <p class="text-xs text-slate-400 mt-0.5">Tạo bộ file Dockerfile, railway.json, requirements.txt, .dockerignore để đưa tool lên Railway chạy online 24/7</p>
+                    </div>
+                    <button onclick="generateRailwayFiles()" id="btnGenerateRailway" class="px-4 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:brightness-110 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-sky-500/20 transition">
+                        <i class="fa-solid fa-file-export"></i> Tạo Bộ File Deploy Railway
+                    </button>
+                </div>
+                <div id="railwayResultBox" class="hidden text-xs bg-slate-950/90 border border-sky-500/40 rounded-xl p-3.5 space-y-2 text-slate-300">
+                    <div class="text-emerald-400 font-bold flex items-center gap-1.5"><i class="fa-solid fa-circle-check"></i> <span id="railwayMsgText"></span></div>
+                    <div class="text-[11px] text-slate-400 leading-relaxed space-y-1">
+                        <p><b>Hướng dẫn 3 bước đưa lên Railway:</b></p>
+                        <ol class="list-decimal list-inside space-y-0.5 text-slate-300">
+                            <li>Bộ file <code>Dockerfile</code>, <code>railway.json</code>, <code>requirements.txt</code> đã được tạo sẵn trong thư mục dự án.</li>
+                            <li>Đẩy (Push / Commit) toàn bộ thư mục này lên GitHub repository của bạn.</li>
+                            <li>Mở <a href="https://railway.app" target="_blank" class="text-sky-400 underline font-bold">Railway.app</a>, tạo New Project ➔ <b>Deploy from GitHub repo</b>. Railway sẽ tự động dựng web và cấp tên miền chạy 24/7!</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 2: QUẢN LÝ WORKSPACE & VIDEO KHÁCH HÀNG -->
+        <div id="viewTab_workspaces" class="hidden space-y-6">
+            <!-- THỐNG KÊ WORKSPACE -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Tổng Số Workspace</div>
+                    <div id="statWsTotal" class="text-2xl font-black text-sky-400 mt-1">0</div>
+                </div>
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Tổng Số Video Đã Render</div>
+                    <div id="statWsVideos" class="text-2xl font-black text-emerald-400 mt-1">0</div>
+                </div>
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Khách Có Gemini API</div>
+                    <div id="statWsGemini" class="text-2xl font-black text-purple-400 mt-1">0</div>
+                </div>
+                <div class="admin-card rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Tiến Trình 24/7 Đang Chạy</div>
+                    <div id="statWsJobs" class="text-2xl font-black text-amber-400 mt-1">0</div>
+                </div>
+            </div>
+
+            <!-- BẢNG WORKSPACES -->
+            <div class="admin-card rounded-2xl overflow-hidden border border-slate-800">
+                <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                        <i class="fa-solid fa-users-gear text-sky-400"></i> Danh Sách Workspace & Video Riêng Của Từng Người Dùng
+                    </h3>
+                    <button onclick="loadWorkspacesList()" class="text-xs text-sky-400 hover:underline flex items-center gap-1">
+                        <i class="fa-solid fa-rotate"></i> Làm mới
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-slate-950 text-slate-400 border-b border-slate-800">
+                            <tr>
+                                <th class="py-3 px-3">Khách Hàng & Workspace</th>
+                                <th class="py-3 px-3">Cấu Hình API (Gemini & Cloud)</th>
+                                <th class="py-3 px-3">Quản Lý Video (Gốc & Thành Phẩm)</th>
+                                <th class="py-3 px-3 text-center">Tiến Trình & Thao Tác</th>
+                            </tr>
+                        </thead>
+                        <tbody id="workspacesTableBody" class="divide-y divide-slate-800/60">
+                            <tr><td colspan="4" class="py-8 text-center text-slate-500">Đang tải danh sách workspace...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -857,7 +920,253 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
                 btn.innerHTML = '<i class="fa-solid fa-file-export"></i> Tạo Bộ File Deploy Railway';
             }
         }
+
+        let currentAdminTab = 'keys';
+        function switchAdminTab(tab) {
+            currentAdminTab = tab;
+            const btnKeys = document.getElementById('tabBtn_keys');
+            const btnWs = document.getElementById('tabBtn_workspaces');
+            const viewKeys = document.getElementById('viewTab_keys');
+            const viewWs = document.getElementById('viewTab_workspaces');
+
+            const activeClass = "px-5 py-2.5 rounded-xl text-xs font-black transition flex items-center gap-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg shadow-purple-500/20";
+            const inactiveClass = "px-5 py-2.5 rounded-xl text-xs font-bold transition flex items-center gap-2 text-slate-400 hover:text-white";
+
+            if (tab === 'keys') {
+                btnKeys.className = activeClass;
+                btnWs.className = inactiveClass;
+                viewKeys.classList.remove('hidden');
+                viewWs.classList.add('hidden');
+                loadKeysList();
+            } else {
+                btnKeys.className = inactiveClass;
+                btnWs.className = activeClass;
+                viewKeys.classList.add('hidden');
+                viewWs.classList.remove('hidden');
+                loadWorkspacesList();
+            }
+        }
+
+        async function loadWorkspacesList() {
+            const tbody = document.getElementById('workspacesTableBody');
+            tbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center text-slate-500"><i class="fa-solid fa-spinner fa-spin mr-2"></i> Đang tải dữ liệu Workspace & Video...</td></tr>';
+            try {
+                const res = await fetch('/api/admin/workspaces', {
+                    headers: { 'Authorization': 'Bearer ' + adminToken }
+                });
+                if (res.status === 401) { logoutAdmin(); return; }
+                const data = await res.json();
+                renderWorkspaces(data.workspaces || []);
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="4" class="py-6 text-center text-rose-400">Lỗi tải danh sách: ${e.message}</td></tr>`;
+            }
+        }
+
+        function renderWorkspaces(workspaces) {
+            const tbody = document.getElementById('workspacesTableBody');
+            let totalVideos = 0, withGemini = 0, runningJobs = 0;
+
+            workspaces.forEach(w => {
+                totalVideos += (w.videos ? w.videos.length : 0);
+                if (w.gemini_keys && w.gemini_keys.trim().length > 5) withGemini++;
+                if (w.jobs && w.jobs.some(j => j.status === 'running')) runningJobs++;
+            });
+
+            document.getElementById('statWsTotal').innerText = workspaces.length;
+            document.getElementById('statWsVideos').innerText = totalVideos;
+            document.getElementById('statWsGemini').innerText = withGemini;
+            document.getElementById('statWsJobs').innerText = runningJobs;
+
+            if (!workspaces.length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center text-slate-500">Chưa có Workspace người dùng nào trên máy chủ.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = workspaces.map((w, idx) => {
+                const tierBadge = w.tier === 'basic'
+                    ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-800 text-slate-300 border border-slate-700">BASIC CPU</span>'
+                    : '<span class="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-gradient-to-r from-amber-500/20 to-purple-500/20 text-amber-300 border border-amber-500/30">PRO GPU</span>';
+
+                // Gemini Keys Preview
+                const rawGKeys = (w.gemini_keys || '').trim();
+                const keyLines = rawGKeys ? rawGKeys.split(/[\\n,;]+/).filter(k => k.trim().length > 10) : [];
+                const keyCount = keyLines.length;
+                const keysId = `gemini_box_${idx}`;
+                const geminiHtml = keyCount > 0
+                    ? `<div>
+                        <div class="flex items-center gap-2">
+                            <span class="px-2 py-0.5 rounded-md bg-purple-950/60 border border-purple-500/40 text-purple-300 font-bold text-[11px]">
+                                <i class="fa-solid fa-wand-magic-sparkles mr-1"></i> ${keyCount} Key (${w.gemini_model || 'gemini-3.5-flash'})
+                            </span>
+                            <button onclick="toggleGeminiKeys('${keysId}')" class="text-[11px] text-sky-400 hover:underline">
+                                <i class="fa-regular fa-eye mr-0.5"></i> Xem/Ẩn
+                            </button>
+                        </div>
+                        <div id="${keysId}" class="hidden mt-1.5 p-2 rounded-lg bg-black/60 border border-purple-500/30 font-mono text-[10px] text-amber-300 select-all max-h-24 overflow-y-auto whitespace-pre-line leading-relaxed">
+                            ${keyLines.join('\\n')}
+                        </div>
+                    </div>`
+                    : `<span class="text-slate-500 italic text-[11px]">Chưa cài đặt Gemini Key</span>`;
+
+                const cloudHtml = (w.kaggle_username || w.github_repo)
+                    ? `<div class="mt-1 text-[10px] text-slate-400 space-y-0.5">
+                        ${w.kaggle_username ? `<div><i class="fa-solid fa-bolt text-amber-400"></i> Kaggle: <b class="text-slate-300">@${w.kaggle_username}</b></div>` : ''}
+                        ${w.github_repo ? `<div><i class="fa-brands fa-github text-slate-400"></i> Repo: <b class="text-slate-300">${w.github_repo}</b></div>` : ''}
+                    </div>`
+                    : '';
+
+                // Video list
+                let videosHtml = '';
+                if (w.videos && w.videos.length > 0) {
+                    videosHtml = w.videos.map(v => {
+                        const isOut = v.filename.includes('output');
+                        const icon = isOut ? 'fa-circle-check text-emerald-400' : 'fa-film text-sky-400';
+                        const badgeColor = isOut ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300' : 'bg-sky-950/50 border-sky-500/40 text-sky-300';
+                        return `
+                        <div class="flex items-center justify-between p-2 rounded-xl border ${badgeColor} bg-slate-950/60 gap-2 mb-1.5">
+                            <div class="truncate">
+                                <span class="font-bold text-[11px] flex items-center gap-1.5">
+                                    <i class="fa-solid ${icon}"></i> ${v.label}
+                                </span>
+                                <span class="text-[10px] text-slate-400 font-mono">${v.size_mb} MB • ${v.modified}</span>
+                            </div>
+                            <div class="flex items-center gap-1.5 shrink-0">
+                                <button onclick="openAdminVideo('${v.url}', '${w.customer} - ${v.label}', '${v.download_url}')" class="px-2.5 py-1 rounded-lg bg-sky-600/80 hover:bg-sky-500 text-white font-bold text-[11px] flex items-center gap-1 transition">
+                                    <i class="fa-solid fa-play"></i> Xem
+                                </button>
+                                <a href="${v.download_url}&token=${encodeURIComponent(adminToken)}" target="_blank" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] transition" title="Tải file về máy">
+                                    <i class="fa-solid fa-download"></i>
+                                </a>
+                            </div>
+                        </div>`;
+                    }).join('');
+                } else {
+                    videosHtml = '<span class="text-slate-500 italic text-[11px]">Chưa có video nào tải lên hoặc render xong</span>';
+                }
+
+                // Jobs status
+                let jobsBadge = '';
+                if (w.jobs && w.jobs.length > 0) {
+                    const activeJob = w.jobs[0];
+                    jobsBadge = activeJob.status === 'running'
+                        ? `<div class="mb-2 px-2.5 py-1.5 rounded-xl bg-amber-950/60 border border-amber-500/40 text-amber-300 text-[11px] font-bold flex items-center gap-1.5 animate-pulse">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Tiến trình 24/7 đang chạy (${activeJob.percent || 0}%)
+                        </div>`
+                        : '';
+                }
+
+                return `
+                <tr class="hover:bg-slate-900/60 transition align-top">
+                    <td class="py-3.5 px-3 space-y-1">
+                        <div class="font-bold text-white text-xs flex items-center gap-2">
+                            <i class="fa-solid fa-user-circle text-purple-400"></i> ${w.customer}
+                        </div>
+                        <div class="font-mono text-[11px] text-sky-400 select-all font-semibold">
+                            ws_${w.ws_id}
+                        </div>
+                        <div class="flex items-center gap-2 text-[10px] text-slate-400">
+                            <span>Key: <b class="text-amber-300 font-mono">${w.key}</b></span>
+                            ${tierBadge}
+                        </div>
+                        ${w.device_id ? `<div class="text-[10px] text-slate-500 font-mono truncate" title="${w.device_id}">Mã máy: ${w.device_id}</div>` : ''}
+                    </td>
+
+                    <td class="py-3.5 px-3 space-y-2">
+                        ${geminiHtml}
+                        ${cloudHtml}
+                    </td>
+
+                    <td class="py-3.5 px-3 space-y-1.5 max-w-xs">
+                        ${jobsBadge}
+                        ${videosHtml}
+                    </td>
+
+                    <td class="py-3.5 px-3 text-center whitespace-nowrap">
+                        <button onclick="cleanWorkspace('${w.ws_id}')" title="Xóa video tạm để giải phóng ổ cứng server" class="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1.5 mx-auto transition">
+                            <i class="fa-solid fa-trash-can"></i> Dọn Video
+                        </button>
+                    </td>
+                </tr>`;
+            }).join('');
+        }
+
+        function toggleGeminiKeys(boxId) {
+            const el = document.getElementById(boxId);
+            if (el) el.classList.toggle('hidden');
+        }
+
+        function openAdminVideo(url, title, dlUrl) {
+            const modal = document.getElementById('adminVideoModal');
+            const player = document.getElementById('adminVideoPlayer');
+            const titleEl = document.getElementById('adminVideoTitle');
+            const dlBtn = document.getElementById('adminVideoDownloadBtn');
+
+            titleEl.innerHTML = `<i class="fa-solid fa-circle-play text-emerald-400"></i> ${title}`;
+            const authedUrl = url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(adminToken);
+            player.src = authedUrl;
+            player.load();
+            player.play().catch(() => {});
+
+            dlBtn.href = (dlUrl || url) + (dlUrl.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(adminToken);
+
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function closeAdminVideo() {
+            const modal = document.getElementById('adminVideoModal');
+            const player = document.getElementById('adminVideoPlayer');
+            if (player) {
+                player.pause();
+                player.src = '';
+            }
+            if (modal) {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+        }
+
+        async function cleanWorkspace(ws_id) {
+            if (!confirm(`Xóa toàn bộ video gốc & video thành phẩm tạm của workspace "${ws_id}" để giải phóng dung lượng đĩa?`)) return;
+            try {
+                const res = await fetch('/api/admin/clean_workspace', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+                    body: JSON.stringify({ ws_id: ws_id })
+                });
+                const d = await res.json();
+                if (d.status === 'ok') {
+                    alert(d.message);
+                    loadWorkspacesList();
+                } else {
+                    alert(d.error || 'Lỗi dọn dẹp workspace');
+                }
+            } catch (e) {
+                alert('Lỗi: ' + e);
+            }
+        }
     </script>
+
+    <!-- MODAL XEM VIDEO DÀNH CHO ADMIN -->
+    <div id="adminVideoModal" class="fixed inset-0 bg-black/90 backdrop-blur-md z-[100] hidden items-center justify-center p-4">
+        <div class="admin-card rounded-3xl max-w-3xl w-full p-5 space-y-3 border border-sky-500/40 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                <h3 id="adminVideoTitle" class="text-xs font-bold text-sky-400 flex items-center gap-2">
+                    <i class="fa-solid fa-circle-play"></i> Trình Xem Video Khách Hàng
+                </h3>
+                <button onclick="closeAdminVideo()" class="text-slate-400 hover:text-white px-2 py-1"><i class="fa-solid fa-xmark text-sm"></i></button>
+            </div>
+            <div class="relative aspect-video bg-black rounded-2xl overflow-hidden border border-white/10 flex items-center justify-center">
+                <video id="adminVideoPlayer" controls class="w-full h-full object-contain"></video>
+            </div>
+            <div class="flex justify-between items-center text-xs text-slate-400 pt-1">
+                <span id="adminVideoInfo" class="text-[11px] text-slate-400"></span>
+                <a id="adminVideoDownloadBtn" href="#" target="_blank" class="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:brightness-110 text-white font-bold flex items-center gap-1.5 transition text-xs shadow-md shadow-sky-500/25">
+                    <i class="fa-solid fa-download"></i> Tải Về Máy Tính
+                </a>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """
