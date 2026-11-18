@@ -525,7 +525,7 @@ def get_workspace_id(req=None):
     Xác định Workspace ID riêng biệt 100% cho từng người dùng & thiết bị:
     1. Key bản quyền + Device ID từ Token (Mỗi thiết bị dùng chung 1 Key vẫn có workspace riêng!)
     2. Hoặc Device Fingerprint (X-Nexus-Device hoặc Cookie nexus_device_fingerprint)
-    3. Hoặc Query Param ?ws=...
+    3. Hoặc Query Param ?ws=... hoặc Form Data
     """
     if req is None:
         try:
@@ -534,9 +534,17 @@ def get_workspace_id(req=None):
         except Exception:
             return "default"
     try:
-        # Lấy dev_id từ header, cookie hoặc param
+        from urllib.parse import unquote
         dev_id = req.headers.get("X-Nexus-Device") or req.cookies.get("nexus_device_fingerprint", "") or req.args.get("device_id", "")
         token = req.headers.get("X-Nexus-Session") or req.cookies.get("nexus_session_token", "")
+        if not dev_id and getattr(req, "form", None):
+            dev_id = req.form.get("device_id", "")
+        if not token and getattr(req, "form", None):
+            token = req.form.get("token", "")
+        if token:
+            token = unquote(token)
+        if dev_id:
+            dev_id = unquote(dev_id)
         
         # 1. Nếu đã đăng nhập / kích hoạt Key
         if token and "|" in token:
@@ -554,6 +562,8 @@ def get_workspace_id(req=None):
             return f"dev_{dev_hash}"
 
         ws_param = req.args.get("ws") or (req.json.get("ws") if req.is_json and req.json else None)
+        if not ws_param and getattr(req, "form", None):
+            ws_param = req.form.get("ws")
         if ws_param:
             safe_p = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(ws_param))
             if safe_p:
@@ -3322,6 +3332,27 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        // Global Fetch Interceptor: Tự động đính kèm Device ID & License Token vào 100% request
+        const _origFetch = window.fetch;
+        window.fetch = function(url, options = {}) {
+            options = options || {};
+            const devId = localStorage.getItem('nexus_device_fingerprint') || localStorage.getItem('nexus_device_id') || '';
+            const token = localStorage.getItem('nexus_session_token') || '';
+            
+            if (options.headers instanceof Headers) {
+                if (devId && !options.headers.has('X-Nexus-Device')) options.headers.set('X-Nexus-Device', devId);
+                if (token && !options.headers.has('X-Nexus-Session')) options.headers.set('X-Nexus-Session', token);
+            } else if (Array.isArray(options.headers)) {
+                if (devId) options.headers.push(['X-Nexus-Device', devId]);
+                if (token) options.headers.push(['X-Nexus-Session', token]);
+            } else {
+                options.headers = options.headers || {};
+                if (devId && !options.headers['X-Nexus-Device']) options.headers['X-Nexus-Device'] = devId;
+                if (token && !options.headers['X-Nexus-Session']) options.headers['X-Nexus-Session'] = token;
+            }
+            return _origFetch(url, options);
+        };
+
         let segments = [];
         let blurRect = { x: 0, y: 0, w: 0, h: 0 };
         let extractMode = "whisper";
@@ -4208,8 +4239,12 @@ HTML_TEMPLATE = """
         document.getElementById('videoInput').addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
+            const devId = (typeof getDeviceFingerprint === 'function') ? getDeviceFingerprint() : (localStorage.getItem('nexus_device_fingerprint') || '');
+            const token = localStorage.getItem('nexus_session_token') || '';
             const formData = new FormData();
             formData.append('video', file);
+            if (devId) formData.append('device_id', devId);
+            if (token) formData.append('token', token);
             setStatus(15, "Đang tải video lên Trạm Trung Chuyển...");
             const res = await fetch('/upload_video', { method: 'POST', body: formData });
             const data = await res.json();
@@ -5781,7 +5816,27 @@ def api_cloud_dispatch():
     ws_dir = get_workspace_dir(request)
     video_path = os.path.join(ws_dir, "input_video.mp4")
     if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+        if dev_id:
+            dev_hash = hashlib.sha256(dev_id.encode("utf-8")).hexdigest()[:10]
+            dev_v = os.path.join(WORKSPACES_ROOT, f"ws_dev_{dev_hash}", "input_video.mp4")
+            if os.path.exists(dev_v) and os.path.getsize(dev_v) > 100:
+                video_path = dev_v
+                try:
+                    os.makedirs(ws_dir, exist_ok=True)
+                    shutil.copy2(dev_v, os.path.join(ws_dir, "input_video.mp4"))
+                except Exception:
+                    pass
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
         video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+        def_v = os.path.join(WORKSPACES_ROOT, "ws_default", "input_video.mp4")
+        if os.path.exists(def_v) and os.path.getsize(def_v) > 100:
+            video_path = def_v
+            try:
+                os.makedirs(ws_dir, exist_ok=True)
+                shutil.copy2(def_v, os.path.join(ws_dir, "input_video.mp4"))
+            except Exception:
+                pass
     if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
         return jsonify({"error": "Vui lòng chọn tải Video lên trước khi chạy!"}), 400
 
@@ -6312,8 +6367,14 @@ def upload_video():
         return jsonify({"error": "Không tìm thấy file video"}), 400
     ws_id = get_workspace_id(request)
     ws_dir = get_workspace_dir(request)
+    os.makedirs(ws_dir, exist_ok=True)
     video_path = os.path.join(ws_dir, "input_video.mp4")
     file.save(video_path)
+    # Lưu bản sao sang TEMP_DIR làm dự phòng toàn cục
+    try:
+        shutil.copy2(video_path, os.path.join(TEMP_DIR, "input_video.mp4"))
+    except Exception:
+        pass
     LAST_AUDIO_SIGNATURE["sig"] = None
     audio_ok = has_audio_stream(video_path)
     return jsonify({"status": "ok", "video_url": f"/workspace/{ws_id}/input_video.mp4?t={int(time.time())}", "has_audio": audio_ok, "workspace": ws_id})
@@ -7464,7 +7525,27 @@ def api_pipeline_start_auto():
     ws_dir = get_workspace_dir(request)
     video_path = os.path.join(ws_dir, "input_video.mp4")
     if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+        if dev_id:
+            dev_hash = hashlib.sha256(dev_id.encode("utf-8")).hexdigest()[:10]
+            dev_v = os.path.join(WORKSPACES_ROOT, f"ws_dev_{dev_hash}", "input_video.mp4")
+            if os.path.exists(dev_v) and os.path.getsize(dev_v) > 100:
+                video_path = dev_v
+                try:
+                    os.makedirs(ws_dir, exist_ok=True)
+                    shutil.copy2(dev_v, os.path.join(ws_dir, "input_video.mp4"))
+                except Exception:
+                    pass
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
         video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+        def_v = os.path.join(WORKSPACES_ROOT, "ws_default", "input_video.mp4")
+        if os.path.exists(def_v) and os.path.getsize(def_v) > 100:
+            video_path = def_v
+            try:
+                os.makedirs(ws_dir, exist_ok=True)
+                shutil.copy2(def_v, os.path.join(ws_dir, "input_video.mp4"))
+            except Exception:
+                pass
     if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
         return jsonify({"error": "Vui lòng tải video lên trước khi chạy tiến trình 24/7!"}), 400
 
@@ -7559,6 +7640,8 @@ def api_pipeline_active_job():
 
     # 3. Nếu không có job, kiểm tra video trong workspace của RIÊNG NGƯỜI NÀY
     video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
     if os.path.exists(video_path) and os.path.getsize(video_path) > 100:
         return jsonify({
             "active": False,
