@@ -600,11 +600,11 @@ requests = ensure_requests()
 _LAST_PROGRESS_TIME = 0.0
 _LAST_PROGRESS_PCT = -1
 
-def report_progress(pct, msg, segments=None, locked_context=None, force=False):
+def report_progress(pct, msg, segments=None, locked_context=None, force=False, gofile_url=None, direct_url=None):
     global _LAST_PROGRESS_TIME, _LAST_PROGRESS_PCT
     now = time.time()
     # Throttle progress reports: don't flood HTTP requests unless forced or has payload
-    if not force and segments is None and locked_context is None:
+    if not force and segments is None and locked_context is None and gofile_url is None and direct_url is None:
         if pct == _LAST_PROGRESS_PCT and (now - _LAST_PROGRESS_TIME) < 4.0:
             return
         if (now - _LAST_PROGRESS_TIME) < 2.5 and pct < 100:
@@ -617,6 +617,10 @@ def report_progress(pct, msg, segments=None, locked_context=None, force=False):
         payload["segments"] = segments
     if locked_context is not None:
         payload["locked_context"] = locked_context
+    if gofile_url:
+        payload["gofile_url"] = gofile_url
+    if direct_url:
+        payload["direct_url"] = direct_url
     try:
         requests.post(f"{RELAY_URL}/api/relay/progress", json=payload, timeout=10)
     except Exception as e:
@@ -1330,8 +1334,47 @@ def run_worker():
         if not os.path.exists(out_video) or os.path.getsize(out_video) < 1000:
             raise RuntimeError("File video thành phẩm không tồn tại hoặc có kích thước 0 byte!")
 
-    # BƯỚC 5: GỬI VIDEO THÀNH PHẨM VỀ TRẠM TRUNG CHUYỂN (HỖ TRỢ CHUNK 8MB CHỐNG TIMEOUT/PROXY)
-    report_progress(95, "Đang truyền Video thành phẩm về Trạm Trung Chuyển của bạn...", force=True)
+    # BƯỚC 5: LƯU TRỮ TRUNG GIAN TỐC ĐỘ CAO (GOFILE.IO & LITTERBOX TRỰC TIẾP) & GỬI VỀ TRẠM
+    gofile_url = ""
+    try:
+        report_progress(91, "Đang tải bản sao lưu Video tốc độ cao lên GoFile.io...", force=True)
+        r_srv = requests.get('https://api.gofile.io/servers', timeout=15)
+        if r_srv.status_code == 200:
+            srv = r_srv.json().get('data', {}).get('servers', [{}])[0].get('name')
+            if srv:
+                with open(out_video, 'rb') as f_gf:
+                    r_up = requests.post(
+                        f'https://{srv}.gofile.io/contents/uploadfile',
+                        files={'file': ('output_vietsub.mp4', f_gf)},
+                        timeout=360
+                    )
+                if r_up.status_code == 200:
+                    d = r_up.json().get('data', {})
+                    gofile_url = d.get('downloadPage') or ""
+                    print(f"[*] GoFile upload OK: {gofile_url}", flush=True)
+    except Exception as e_gf:
+        print(f"[!] Upload GoFile notice: {e_gf}", flush=True)
+
+    direct_url = ""
+    try:
+        if os.path.getsize(out_video) < 950 * 1024 * 1024:
+            report_progress(93, "Đang tạo Link xem trực tiếp video trên trình duyệt...", force=True)
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            with open(out_video, 'rb') as f_lb:
+                r_lb = requests.post(
+                    'https://litterbox.catbox.moe/resources/internals/api.php',
+                    files={'fileToUpload': ('output_vietsub.mp4', f_lb)},
+                    data={'reqtype': 'fileupload', 'time': '72h'},
+                    headers=headers,
+                    timeout=360
+                )
+            if r_lb.status_code == 200 and r_lb.text.strip().startswith('http'):
+                direct_url = r_lb.text.strip()
+                print(f"[*] Direct Stream URL OK: {direct_url}", flush=True)
+    except Exception as e_lb:
+        print(f"[!] Upload Litterbox notice: {e_lb}", flush=True)
+
+    report_progress(95, "Đang truyền Video thành phẩm về Trạm Trung Chuyển của bạn...", force=True, gofile_url=gofile_url, direct_url=direct_url)
     video_size = os.path.getsize(out_video)
     chunk_size = 8 * 1024 * 1024  # 8MB per chunk
     total_chunks = max(1, math.ceil(video_size / chunk_size))
@@ -1345,11 +1388,16 @@ def run_worker():
                 for c_idx in range(total_chunks):
                     chunk_bytes = f_in.read(chunk_size)
                     files = {"chunk": (f"part_{c_idx:05d}.bin", chunk_bytes, "application/octet-stream")}
-                    data = {"chunk_index": c_idx, "total_chunks": total_chunks}
+                    data = {
+                        "chunk_index": c_idx,
+                        "total_chunks": total_chunks,
+                        "gofile_url": gofile_url,
+                        "direct_url": direct_url
+                    }
                     if c_idx == total_chunks - 1:
                         data["segments_json"] = seg_payload
                     pct = 95 + int((c_idx / total_chunks) * 4)
-                    report_progress(pct, f"Đang truyền video về Trạm ({c_idx+1}/{total_chunks} phần)...", force=True)
+                    report_progress(pct, f"Đang truyền video về Trạm ({c_idx+1}/{total_chunks} phần)...", force=True, gofile_url=gofile_url, direct_url=direct_url)
                     chunk_ok = False
                     for retry in range(4):
                         try:
@@ -1369,14 +1417,21 @@ def run_worker():
             print(f"[!] Truyền dạng cắt mảnh gặp lỗi: {e_chunk}, chuyển sang gửi trực tiếp 1 lần...", flush=True)
 
     if not uploaded_ok:
-        with open(out_video, "rb") as vf_file:
-            files = {"video": ("output_vietsub.mp4", vf_file, "video/mp4")}
-            data = {"segments_json": seg_payload}
-            r_up = requests.post(f"{RELAY_URL}/api/relay/upload_result/{JOB_ID}", files=files, data=data, timeout=600)
-            if r_up.status_code != 200:
-                raise RuntimeError(f"Trạm trung chuyển từ chối nhận video ({r_up.status_code}): {r_up.text[:300]}")
+        try:
+            with open(out_video, "rb") as vf_file:
+                files = {"video": ("output_vietsub.mp4", vf_file, "video/mp4")}
+                data = {
+                    "segments_json": seg_payload,
+                    "gofile_url": gofile_url,
+                    "direct_url": direct_url
+                }
+                r_up = requests.post(f"{RELAY_URL}/api/relay/upload_result/{JOB_ID}", files=files, data=data, timeout=600)
+                if r_up.status_code == 200:
+                    uploaded_ok = True
+        except Exception as e_up:
+            print(f"[!] Upload trực tiếp gặp lỗi: {e_up}", flush=True)
 
-    report_progress(100, "Đã trả Video về Trạm Trung Chuyển! Đang tự động ngắt phiên Cloud...", force=True)
+    report_progress(100, "🎉 Hoàn tất 100%! Đã lưu trữ Video trên GoFile & Trạm Trung Chuyển.", force=True, gofile_url=gofile_url, direct_url=direct_url)
 
     if GH_TOKEN and GH_CODESPACE:
         try:
@@ -2558,6 +2613,17 @@ HTML_TEMPLATE = """
                             <i class="fa-solid fa-earth-asia text-3xl mb-2 block opacity-40 text-sky-400"></i>
                             Tích hợp <b>SmartBlur Quét 3-5p Đầu</b>, <b>Chữ mờ chạy kiểu DVD</b> & <b>Logo chống Reup</b> (vào Tab 3 để bật).
                         </div>
+                    </div>
+                    <div id="cloudDownloadLinks" class="hidden px-3.5 py-2 bg-[#060911] border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <a id="btnGofile" href="#" target="_blank" class="hidden px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-xs font-bold border border-amber-500/40 flex items-center gap-1.5 shadow-sm transition">
+                                <i class="fa-solid fa-cloud-arrow-down text-amber-400"></i> Tải / Xem Nhanh GoFile
+                            </a>
+                            <a id="btnDirectStream" href="#" target="_blank" class="hidden px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-xs font-bold border border-emerald-500/40 flex items-center gap-1.5 shadow-sm transition">
+                                <i class="fa-solid fa-play text-emerald-400"></i> Xem Link Trực Tiếp
+                            </a>
+                        </div>
+                        <span id="cloudLinkNote" class="text-[10px] text-slate-400 font-medium">Lưu trữ đám mây tốc độ cao</span>
                     </div>
                 </div>
             </div>
@@ -4570,7 +4636,7 @@ HTML_TEMPLATE = """
                         drawOverlayOnCanvas();
                     }
 
-                    if (data.status === 'completed') {
+                    if (data.status === 'completed' || (parseInt(data.percent || 0) >= 99 && (data.output_url || data.gofile_url || data.direct_url))) {
                         clearInterval(serverJobTimer);
                         serverJobTimer = null;
                         document.getElementById('statusSpinner').classList.add('hidden');
@@ -4586,17 +4652,34 @@ HTML_TEMPLATE = """
                         const outVideo = document.getElementById('outputVideo');
                         document.getElementById('outputPlaceholder').classList.add('hidden');
                         outVideo.classList.remove('hidden');
-                        outVideo.src = data.output_url + '?t=' + Date.now();
-                        outVideo.load();
+                        const finalPlaySrc = (data.direct_url || data.output_url || '') + (data.direct_url ? '' : '?t=' + Date.now());
+                        if (finalPlaySrc) {
+                            outVideo.src = finalPlaySrc;
+                            outVideo.load();
+                        }
 
+                        const dlUrl = data.gofile_url || data.output_url || '#';
                         const dlBtn = document.getElementById('downloadBtn');
-                        dlBtn.href = data.output_url;
+                        dlBtn.href = dlUrl;
                         dlBtn.classList.remove('hidden');
 
                         const mobDl = document.getElementById('mobileDownloadBtn');
                         if (mobDl) {
-                            mobDl.href = data.output_url;
+                            mobDl.href = dlUrl;
                             mobDl.classList.remove('hidden');
+                        }
+
+                        if (data.gofile_url) {
+                            const gf = document.getElementById('btnGofile');
+                            if (gf) { gf.href = data.gofile_url; gf.classList.remove('hidden'); }
+                        }
+                        if (data.direct_url) {
+                            const ds = document.getElementById('btnDirectStream');
+                            if (ds) { ds.href = data.direct_url; ds.classList.remove('hidden'); }
+                        }
+                        const cl = document.getElementById('cloudDownloadLinks');
+                        if (cl && (data.gofile_url || data.direct_url)) {
+                            cl.classList.remove('hidden');
                         }
 
                         const rBadge = document.getElementById('renderBadge');
@@ -4663,26 +4746,39 @@ HTML_TEMPLATE = """
                         drawOverlayOnCanvas();
                     }
 
-                    if (job.status === 'running') {
-                        setStatus(job.percent || 10, job.message || "Đang xử lý 24/7 ngầm trên máy chủ...");
-                        showToast("⚡ Phát hiện tiến trình 24/7 đang tiếp tục chạy ngầm từ trước! Đang tiếp tục đồng bộ...", 5000);
-                        pollServerJob(job.job_id);
-                    } else if (job.status === 'completed') {
+                    if (job.status === 'completed' || (parseInt(job.percent || 0) >= 99 && (job.output_url || job.gofile_url || job.direct_url))) {
                         setStatus(100, "Tiến trình 24/7 đã hoàn tất!");
                         const outVideo = document.getElementById('outputVideo');
                         document.getElementById('outputPlaceholder').classList.add('hidden');
                         outVideo.classList.remove('hidden');
-                        outVideo.src = job.output_url + '?t=' + Date.now();
-                        outVideo.load();
+                        const finalPlaySrc = (job.direct_url || job.output_url || '') + (job.direct_url ? '' : '?t=' + Date.now());
+                        if (finalPlaySrc) {
+                            outVideo.src = finalPlaySrc;
+                            outVideo.load();
+                        }
 
+                        const dlUrl = job.gofile_url || job.output_url || '#';
                         const dlBtn = document.getElementById('downloadBtn');
-                        dlBtn.href = job.output_url;
+                        dlBtn.href = dlUrl;
                         dlBtn.classList.remove('hidden');
 
                         const mobDl = document.getElementById('mobileDownloadBtn');
                         if (mobDl) {
-                            mobDl.href = job.output_url;
+                            mobDl.href = dlUrl;
                             mobDl.classList.remove('hidden');
+                        }
+
+                        if (job.gofile_url) {
+                            const gf = document.getElementById('btnGofile');
+                            if (gf) { gf.href = job.gofile_url; gf.classList.remove('hidden'); }
+                        }
+                        if (job.direct_url) {
+                            const ds = document.getElementById('btnDirectStream');
+                            if (ds) { ds.href = job.direct_url; ds.classList.remove('hidden'); }
+                        }
+                        const cl = document.getElementById('cloudDownloadLinks');
+                        if (cl && (job.gofile_url || job.direct_url)) {
+                            cl.classList.remove('hidden');
                         }
 
                         const rBadge = document.getElementById('renderBadge');
@@ -4692,6 +4788,10 @@ HTML_TEMPLATE = """
                         }
 
                         showToast("🎉 Tiến trình 24/7 đã hoàn tất trong lúc bạn rời trang web/tắt máy! Video đã sẵn sàng xem & tải về.", 8000);
+                    } else if (job.status === 'running') {
+                        setStatus(job.percent || 10, job.message || "Đang xử lý 24/7 ngầm trên máy chủ...");
+                        showToast("⚡ Phát hiện tiến trình 24/7 đang tiếp tục chạy ngầm từ trước! Đang tiếp tục đồng bộ...", 5000);
+                        pollServerJob(job.job_id);
                     } else if (job.status === 'error') {
                         let jErr = "Đã xảy ra sự cố trong quá trình xử lý 24/7.";
                         if (job && job.error && job.error !== 'undefined') jErr = typeof job.error === 'object' ? JSON.stringify(job.error) : String(job.error);
@@ -5206,9 +5306,18 @@ def api_relay_receive_progress():
         os.makedirs(job_dir, exist_ok=True)
         with SERVER_JOBS_LOCK:
             job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
-            job["percent"] = int(pct)
+            job["percent"] = max(job.get("percent", 0), int(pct))
             job["message"] = str(msg)
-            job["status"] = "running"
+            if data.get("gofile_url"):
+                job["gofile_url"] = data["gofile_url"]
+            if data.get("direct_url"):
+                job["direct_url"] = data["direct_url"]
+            if job.get("status") != "completed":
+                if int(pct) >= 100 and (job.get("output_url") or job.get("gofile_url") or job.get("direct_url")):
+                    job["status"] = "completed"
+                    job["step"] = "done"
+                else:
+                    job["status"] = "running"
             job["updated_at"] = datetime.now().isoformat()
             if data.get("segments"):
                 job["segments"] = data["segments"]
@@ -5294,12 +5403,19 @@ def api_relay_upload_chunk(job_id):
         update_progress(100, "🎉 Đã nhận đầy đủ Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!")
 
         out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
+        gf_url = request.form.get("gofile_url", "")
+        dir_url = request.form.get("direct_url", "")
+        if gf_url: ACTIVE_CLOUD_JOB["gofile_url"] = gf_url
+        if dir_url: ACTIVE_CLOUD_JOB["direct_url"] = dir_url
+
         with SERVER_JOBS_LOCK:
             job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
             job["percent"] = 100
             job["status"] = "completed"
             job["step"] = "done"
             job["output_url"] = out_url
+            if gf_url: job["gofile_url"] = gf_url
+            if dir_url: job["direct_url"] = dir_url
             job["updated_at"] = datetime.now().isoformat()
             if segs:
                 job["segments"] = segs
@@ -5348,12 +5464,19 @@ def api_relay_upload_result(job_id):
     update_progress(100, "🎉 Đã nhận Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!")
 
     out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
+    gf_url = request.form.get("gofile_url", "")
+    dir_url = request.form.get("direct_url", "")
+    if gf_url: ACTIVE_CLOUD_JOB["gofile_url"] = gf_url
+    if dir_url: ACTIVE_CLOUD_JOB["direct_url"] = dir_url
+
     with SERVER_JOBS_LOCK:
         job = ACTIVE_SERVER_JOBS.get(job_id, {"job_id": job_id})
         job["percent"] = 100
         job["status"] = "completed"
         job["step"] = "done"
         job["output_url"] = out_url
+        if gf_url: job["gofile_url"] = gf_url
+        if dir_url: job["direct_url"] = dir_url
         job["updated_at"] = datetime.now().isoformat()
         if segs:
             job["segments"] = segs
@@ -6703,31 +6826,30 @@ def api_pipeline_active_job():
 
     # 2. Tìm job mới nhất của thiết bị
     latest_job = None
-    latest_time = 0
+    # 2. Tìm job mới nhất của thiết bị trong bộ nhớ hoặc trên ổ đĩa
+    candidate_jobs = []
     with SERVER_JOBS_LOCK:
         for jid, j in ACTIVE_SERVER_JOBS.items():
             if not dev_id or j.get("device_id") == dev_id:
-                return jsonify({"active": True, "job": j})
+                candidate_jobs.append(j)
 
-    # 3. Quét thư mục server_jobs tìm job gần nhất
     if os.path.exists(SERVER_JOBS_DIR):
         for entry in os.scandir(SERVER_JOBS_DIR):
             if entry.is_dir():
                 s_file = os.path.join(entry.path, "state.json")
                 if os.path.exists(s_file):
                     try:
-                        mtime = os.path.getmtime(s_file)
-                        if mtime > latest_time:
-                            with open(s_file, "r", encoding="utf-8") as f:
-                                cand = json.load(f)
-                                if not dev_id or cand.get("device_id") == dev_id:
-                                    latest_time = mtime
-                                    latest_job = cand
+                        with open(s_file, "r", encoding="utf-8") as f:
+                            cand = json.load(f)
+                            if not dev_id or cand.get("device_id") == dev_id:
+                                if not any(c.get("job_id") == cand.get("job_id") for c in candidate_jobs):
+                                    candidate_jobs.append(cand)
                     except Exception:
                         pass
 
-    if latest_job:
-        return jsonify({"active": True, "job": latest_job})
+    if candidate_jobs:
+        candidate_jobs.sort(key=lambda x: str(x.get("updated_at", x.get("created_at", ""))), reverse=True)
+        return jsonify({"active": True, "job": candidate_jobs[0]})
 
     # 4. Nếu không có job, kiểm tra xem có video đã tải lên trong phiên làm việc hiện tại không
     video_path = os.path.join(TEMP_DIR, "input_video.mp4")
@@ -6745,6 +6867,24 @@ def api_pipeline_job_video(job_id, filename):
     job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
     if os.path.exists(os.path.join(job_dir, filename)):
         return send_from_directory(job_dir, filename)
+    if os.path.exists(os.path.join(TEMP_DIR, filename)):
+        return send_from_directory(TEMP_DIR, filename)
+    # Tự động chuyển hướng sang Link trực tiếp hoặc GoFile nếu file chưa về đĩa Railway
+    with SERVER_JOBS_LOCK:
+        job = ACTIVE_SERVER_JOBS.get(job_id)
+    if not job:
+        job_file = os.path.join(job_dir, "state.json")
+        if os.path.exists(job_file):
+            try:
+                with open(job_file, "r", encoding="utf-8") as f:
+                    job = json.load(f)
+            except Exception:
+                pass
+    if job:
+        if job.get("direct_url"):
+            return redirect(job["direct_url"])
+        if job.get("gofile_url"):
+            return redirect(job["gofile_url"])
     return send_from_directory(TEMP_DIR, filename)
 
 # ==================== CỔNG QUẢN TRỊ BẢN QUYỀN (ADMIN & CLIENT LICENSE) ====================
