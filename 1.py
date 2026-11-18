@@ -4775,7 +4775,7 @@ HTML_TEMPLATE = """
         function updateSettingsKeyCount() {
             const sKeys = document.getElementById('settingsGeminiKeys');
             if (!sKeys) return;
-            const lines = sKeys.value.split(/[\n,;]+/).map(s => s.trim()).filter(s => s.length > 10);
+            const lines = sKeys.value.split(/[\\n,;]+/).map(s => s.trim()).filter(s => s.length > 10);
             const badge = document.getElementById('settingsKeyCountBadge');
             if (badge) badge.innerText = `${lines.length} Key`;
         }
