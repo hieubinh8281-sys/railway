@@ -392,9 +392,10 @@ def build_filter_complex_with_logo(
 
     if bw >= 8 and bh >= 8:
         b_steps = [f"crop={bw}:{bh}:{bx}:{by}"]
+        # Kính mờ tự nhiên chuẩn Studio cao cấp (không viền đen, không ám màu)
         if blur_sigma > 0:
-            b_steps.append(f"gblur=sigma={blur_sigma}")
-        if blur_opacity > 0.01:
+            b_steps.append(f"boxblur=luma_radius={blur_sigma}:luma_power=2")
+        if blur_opacity > 0.02:
             b_steps.append(f"drawbox=x=0:y=0:w={bw}:h={bh}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
         base_chain = (
             f"[0:v]split=2[main][cs];"
