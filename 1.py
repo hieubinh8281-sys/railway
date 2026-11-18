@@ -1554,16 +1554,18 @@ def dispatch_kaggle_t4_worker(job_id):
     if not username or not key:
         raise RuntimeError("Chưa cấu hình Kaggle Username & API Key! Hãy bấm nút '☁️ Cấu Hình Cloud' trên thanh công cụ để nhập thông tin.")
 
+    # 1. Đặt biến môi trường chuẩn xác cho Kaggle API
     os.environ["KAGGLE_USERNAME"] = username
     os.environ["KAGGLE_KEY"] = key
-    os.environ["KAGGLE_API_TOKEN"] = key
+    os.environ.pop("KAGGLE_API_TOKEN", None)
 
     kaggle_env = dict(os.environ)
     kaggle_env["KAGGLE_USERNAME"] = username
     kaggle_env["KAGGLE_KEY"] = key
-    kaggle_env["KAGGLE_API_TOKEN"] = key
+    kaggle_env.pop("KAGGLE_API_TOKEN", None)
 
-    # Ghi file kaggle.json và access_token ở cả ~/.kaggle và /tmp/.kaggle để Kaggle CLI nhận diện 100%
+    # 2. Ghi file kaggle.json và XÓA file access_token nếu có
+    # (Vì access_token là chuẩn OAuth mới của Kaggle v2, nếu ghi nhầm API key vào đó sẽ làm hỏng xác thực Option A/B)
     target_dirs = [os.path.expanduser("~/.kaggle")]
     if os.name != "nt":
         target_dirs.extend(["/root/.kaggle", "/tmp/.kaggle"])
@@ -1574,23 +1576,18 @@ def dispatch_kaggle_t4_worker(job_id):
             k_json = os.path.join(k_dir, "kaggle.json")
             with open(k_json, "w", encoding="utf-8") as f:
                 json.dump({"username": username, "key": key}, f)
-            k_tok = os.path.join(k_dir, "access_token")
-            with open(k_tok, "w", encoding="utf-8") as f:
-                f.write(key)
             if os.name != "nt":
                 os.chmod(k_json, 0o600)
-                os.chmod(k_tok, 0o600)
+            # Xóa sạch access_token cũ để Kaggle ưu tiên dùng kaggle.json chuẩn
+            k_tok = os.path.join(k_dir, "access_token")
+            if os.path.exists(k_tok):
+                try: os.remove(k_tok)
+                except Exception: pass
         except Exception:
             pass
 
     kaggle_env["KAGGLE_CONFIG_DIR"] = target_dirs[0]
-
-    try:
-        import six
-        import kaggle
-    except (ImportError, ModuleNotFoundError):
-        update_progress(4, "Đang chuẩn bị thư viện 'kaggle' & 'six'...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "six>=1.16.0", "kaggle>=1.6.14"], check=False)
+    os.environ["KAGGLE_CONFIG_DIR"] = target_dirs[0]
 
     shutil.rmtree(KAGGLE_PUSH_DIR, ignore_errors=True)
     os.makedirs(KAGGLE_PUSH_DIR, exist_ok=True)
@@ -1616,16 +1613,39 @@ def dispatch_kaggle_t4_worker(job_id):
         json.dump(kernel_meta, f, indent=2)
 
     update_progress(5, f"Đang khởi tạo phiên GPU T4 trên Kaggle ({username}/{slug})...")
-    proc = subprocess.run(
-        [sys.executable, "-m", "kaggle", "kernels", "push", "-p", KAGGLE_PUSH_DIR],
-        capture_output=True, text=True, encoding="utf-8", errors="ignore",
-        env=kaggle_env
-    )
-    if proc.returncode != 0:
-        err_raw = (proc.stderr or proc.stdout or "").strip()
-        if "401" in err_raw or "Unauthorized" in err_raw or "403" in err_raw or "credentials" in err_raw.lower():
-            raise RuntimeError(f"Kaggle API Key hoặc Username không hợp lệ ({err_raw})! Hãy kiểm tra lại trong '☁️ Cấu Hình Cloud' hoặc tải file kaggle.json mới.")
-        raise RuntimeError(f"Lỗi đẩy phiên lên Kaggle: {err_raw}")
+
+    # 3. Kích hoạt phiên bằng Kaggle Python API trực tiếp (không bị lỗi CLI Option A/B)
+    push_done = False
+    last_err = ""
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+        api = KaggleApi()
+        api.authenticate()
+        res = api.kernels_push(KAGGLE_PUSH_DIR)
+        if res and getattr(res, "error", None):
+            raise RuntimeError(str(res.error))
+        push_done = True
+    except Exception as e_api:
+        last_err = str(e_api)
+        print(f"[!] Kaggle API Direct Push failed ({e_api}), fallback to subprocess...", flush=True)
+
+    if not push_done:
+        proc = subprocess.run(
+            [sys.executable, "-m", "kaggle", "kernels", "push", "-p", KAGGLE_PUSH_DIR],
+            capture_output=True, text=True, encoding="utf-8", errors="ignore",
+            env=kaggle_env
+        )
+        if proc.returncode == 0:
+            push_done = True
+        else:
+            last_err = (proc.stderr or proc.stdout or "").strip()
+
+    if not push_done:
+        if "401" in last_err or "Unauthorized" in last_err or "403" in last_err or "credentials" in last_err.lower():
+            raise RuntimeError(f"Kaggle API Key hoặc Username không hợp lệ ({last_err})! Hãy kiểm tra lại trong '☁️ Cấu Hình Cloud' hoặc tải file kaggle.json mới.")
+        if "phone" in last_err.lower() or "verify" in last_err.lower():
+            raise RuntimeError(f"Kaggle yêu cầu xác thực số điện thoại để dùng GPU/Internet! Bạn hãy vào Kaggle.com -> Account Settings -> Phone verification để kích hoạt.")
+        raise RuntimeError(f"Lỗi đẩy phiên lên Kaggle: {last_err}")
 
     update_progress(8, "Đã bật phiên Kaggle GPU T4! Đang chờ Kaggle tải Video từ Trạm Trung Chuyển...")
 
