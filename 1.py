@@ -495,9 +495,11 @@ PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
 CLOUD_CONFIG_FILE = os.path.join(BASE_DIR, "cloud_workers_config.json")
 KAGGLE_PUSH_DIR = os.path.join(BASE_DIR, "kaggle_worker_build")
 SERVER_JOBS_DIR = os.path.join(BASE_DIR, "server_jobs")
+WORKSPACES_ROOT = os.path.join(BASE_DIR, "workspaces")
 
 os.makedirs(PROJECTS_DIR, exist_ok=True)
 os.makedirs(SERVER_JOBS_DIR, exist_ok=True)
+os.makedirs(WORKSPACES_ROOT, exist_ok=True)
 
 ACTIVE_SERVER_JOBS = {}
 SERVER_JOBS_LOCK = Lock()
@@ -505,6 +507,7 @@ SERVER_JOBS_LOCK = Lock()
 LAST_AUDIO_SIGNATURE = {"sig": None}
 PROGRESS_LOCK = Lock()
 PROGRESS_STATE = {"percent": 0, "message": "Sẵn sàng"}
+WORKSPACE_PROGRESS = {}
 
 ACTIVE_CLOUD_JOB = {
     "job_id": None,
@@ -517,11 +520,64 @@ ACTIVE_CLOUD_JOB = {
     "output_ready": False
 }
 
-def update_progress(percent, message):
+def get_workspace_id(req=None):
+    """
+    Xác định Workspace ID riêng biệt cho từng người dùng:
+    1. Key bản quyền từ Token (X-Nexus-Session hoặc Cookie nexus_session_token)
+    2. Hoặc Device Fingerprint (X-Nexus-Device hoặc Cookie nexus_device_fingerprint)
+    3. Hoặc Query Param ?ws=...
+    """
+    if req is None:
+        try:
+            from flask import request as flask_req
+            req = flask_req
+        except Exception:
+            return "default"
+    try:
+        token = req.headers.get("X-Nexus-Session") or req.cookies.get("nexus_session_token", "")
+        if token and "|" in token:
+            parts = token.split("|")
+            key_raw = parts[0].strip()
+            safe_key = re.sub(r'[^a-zA-Z0-9_\-]', '_', key_raw)
+            if safe_key:
+                return safe_key[:32]
+        
+        dev_id = req.headers.get("X-Nexus-Device") or req.cookies.get("nexus_device_fingerprint", "")
+        if dev_id:
+            safe_dev = re.sub(r'[^a-zA-Z0-9_\-]', '_', dev_id)
+            if safe_dev:
+                return f"dev_{safe_dev[:16]}"
+                
+        ws_param = req.args.get("ws") or (req.json.get("ws") if req.is_json and req.json else None)
+        if ws_param:
+            safe_p = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(ws_param))
+            if safe_p:
+                return safe_p[:32]
+    except Exception:
+        pass
+    return "default"
+
+def get_workspace_dir(req=None):
+    """
+    Lấy đường dẫn thư mục làm việc độc lập của tài khoản / thiết bị hiện tại.
+    Mỗi người dùng có toàn bộ kho video, sub, tts_cache, ocr_crops và dự án riêng biệt.
+    """
+    ws_id = get_workspace_id(req)
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+    os.makedirs(ws_dir, exist_ok=True)
+    os.makedirs(os.path.join(ws_dir, "tts_cache"), exist_ok=True)
+    os.makedirs(os.path.join(ws_dir, "ocr_crops"), exist_ok=True)
+    os.makedirs(os.path.join(ws_dir, "projects"), exist_ok=True)
+    return ws_dir
+
+def update_progress(percent, message, ws_id=None):
     with PROGRESS_LOCK:
-        PROGRESS_STATE["percent"] = max(0, min(100, int(percent)))
-        PROGRESS_STATE["message"] = message
-        print(f"[{PROGRESS_STATE['percent']:3d}%] {message}", flush=True)
+        p = max(0, min(100, int(percent)))
+        PROGRESS_STATE["percent"] = p
+        PROGRESS_STATE["message"] = str(message)
+        if ws_id:
+            WORKSPACE_PROGRESS[ws_id] = {"percent": p, "message": str(message)}
+        print(f"[{p:3d}%] {message}", flush=True)
 
 def reset_temp_session():
     shutil.rmtree(TEMP_DIR, ignore_errors=True)
@@ -531,6 +587,24 @@ def reset_temp_session():
     LAST_AUDIO_SIGNATURE["sig"] = None
     ACTIVE_CLOUD_JOB["status"] = "idle"
     ACTIVE_CLOUD_JOB["output_ready"] = False
+
+def reset_user_workspace(ws_id=None):
+    if not ws_id or ws_id == "default":
+        reset_temp_session()
+        return
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+    if os.path.exists(ws_dir):
+        for item in ["input_video.mp4", "output_vietsub.mp4", "sub_vi.srt", "sub_vi.vtt", "sub_vi.ass", "mixed_audio.wav", "voice_preview.mp3"]:
+            p = os.path.join(ws_dir, item)
+            if os.path.exists(p):
+                try: os.remove(p)
+                except Exception: pass
+        shutil.rmtree(os.path.join(ws_dir, "tts_cache"), ignore_errors=True)
+        shutil.rmtree(os.path.join(ws_dir, "ocr_crops"), ignore_errors=True)
+        os.makedirs(os.path.join(ws_dir, "tts_cache"), exist_ok=True)
+        os.makedirs(os.path.join(ws_dir, "ocr_crops"), exist_ok=True)
+    with PROGRESS_LOCK:
+        WORKSPACE_PROGRESS[ws_id] = {"percent": 0, "message": "Sẵn sàng"}
 
 reset_temp_session()
 
@@ -1261,14 +1335,15 @@ def run_worker():
         bx, by = max(0, int(br.get("x",0))//2*2), max(0, int(br.get("y",0))//2*2)
         bw = 0 if bx >= vid_w - 4 else min(max(0, int(br.get("w",0))//2*2), (vid_w - bx)//2*2)
         bh = 0 if by >= vid_h - 4 else min(max(0, int(br.get("h",0))//2*2), (vid_h - by)//2*2)
-        b_op = float(st.get("blurOpacity", 40)) / 100.0
-        b_sig = int(st.get("blurSigma", 16))
+        b_op = float(st.get("blurOpacity", 0)) / 100.0
+        b_sig = int(st.get("blurSigma", 14))
         b_col = st.get("blurColor", "#000000").lstrip('#')
 
         if bw >= 8 and bh >= 8:
             b_steps = [f"crop={bw}:{bh}:{bx}:{by}"]
-            if b_sig > 0: b_steps.append(f"gblur=sigma={b_sig}")
-            if b_op > 0.01: b_steps.append(f"drawbox=x=0:y=0:w={bw}:h={bh}:color=0x{b_col}@{b_op:.2f}:t=fill")
+            # Kính mờ tự nhiên chuẩn Studio cao cấp (không viền đen, không ám màu)
+            if b_sig > 0: b_steps.append(f"boxblur=luma_radius={b_sig}:luma_power=2")
+            if b_op > 0.02: b_steps.append(f"drawbox=x=0:y=0:w={bw}:h={bh}:color=0x{b_col}@{b_op:.2f}:t=fill")
             base_vf = f"[0:v]split=2[main][cs];[cs]{','.join(b_steps)}[bl];[main][bl]overlay={bx}:{by}:shortest=1,ass=sub_vi.ass[v_sub]"
         else:
             base_vf = "[0:v]ass=sub_vi.ass[v_sub]"
@@ -1856,7 +1931,9 @@ HTML_TEMPLATE = """
             --accent-primary: #0ea5e9;
             --accent-secondary: #6366f1;
             --accent-gradient: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
-            --accent-glow: rgba(14, 165, 233, 0.35);
+            --accent-glow: rgba(14, 165, 233, 0.45);
+            --accent-text: #38bdf8;
+            --accent-border: rgba(14, 165, 233, 0.4);
             --bg-deep: #05070f;
             --panel-bg: rgba(10, 14, 26, 0.94);
             --card-bg: rgba(14, 20, 36, 0.72);
@@ -1867,32 +1944,76 @@ HTML_TEMPLATE = """
             --accent-primary: #a855f7;
             --accent-secondary: #8b5cf6;
             --accent-gradient: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
-            --accent-glow: rgba(168, 85, 247, 0.35);
+            --accent-glow: rgba(168, 85, 247, 0.45);
+            --accent-text: #c084fc;
+            --accent-border: rgba(168, 85, 247, 0.45);
         }
         [data-theme="emerald"] {
             --accent-primary: #10b981;
             --accent-secondary: #06b6d4;
             --accent-gradient: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
-            --accent-glow: rgba(16, 185, 129, 0.35);
+            --accent-glow: rgba(16, 185, 129, 0.45);
+            --accent-text: #34d399;
+            --accent-border: rgba(16, 185, 129, 0.45);
         }
         [data-theme="amber"] {
             --accent-primary: #f59e0b;
             --accent-secondary: #ea580c;
             --accent-gradient: linear-gradient(135deg, #f59e0b 0%, #ea580c 100%);
-            --accent-glow: rgba(245, 158, 11, 0.35);
+            --accent-glow: rgba(245, 158, 11, 0.45);
+            --accent-text: #fbbf24;
+            --accent-border: rgba(245, 158, 11, 0.45);
         }
         [data-theme="crimson"] {
             --accent-primary: #f43f5e;
             --accent-secondary: #be123c;
             --accent-gradient: linear-gradient(135deg, #f43f5e 0%, #be123c 100%);
-            --accent-glow: rgba(244, 63, 94, 0.35);
+            --accent-glow: rgba(244, 63, 94, 0.45);
+            --accent-text: #fb7185;
+            --accent-border: rgba(244, 63, 94, 0.45);
         }
         [data-theme="obsidian"] {
             --accent-primary: #94a3b8;
-            --accent-secondary: #cbd5e1;
+            --accent-secondary: #64748b;
             --accent-gradient: linear-gradient(135deg, #64748b 0%, #94a3b8 100%);
-            --accent-glow: rgba(148, 163, 184, 0.25);
+            --accent-glow: rgba(148, 163, 184, 0.35);
+            --accent-text: #cbd5e1;
+            --accent-border: rgba(148, 163, 184, 0.4);
         }
+        [data-theme="cyber"] {
+            --accent-primary: #0ea5e9;
+            --accent-secondary: #6366f1;
+            --accent-gradient: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+            --accent-glow: rgba(14, 165, 233, 0.45);
+            --accent-text: #38bdf8;
+            --accent-border: rgba(14, 165, 233, 0.4);
+        }
+
+        /* LIVE CSS BINDINGS FOR THEME TRANSFORMATION */
+        [data-theme] .text-sky-400,
+        [data-theme] .text-sky-300 {
+            color: var(--accent-text) !important;
+        }
+        [data-theme] .border-sky-500,
+        [data-theme] .border-sky-500\/30,
+        [data-theme] .border-sky-500\/40,
+        [data-theme] .border-sky-500\/50 {
+            border-color: var(--accent-border) !important;
+        }
+        [data-theme] #btnAutoAll {
+            background: var(--accent-gradient) !important;
+            box-shadow: 0 4px 18px var(--accent-glow) !important;
+        }
+        [data-theme] #progressBar,
+        [data-theme] #mobProgressBar {
+            background: var(--accent-gradient) !important;
+        }
+        [data-theme] .nav-pill.active {
+            background: var(--accent-gradient) !important;
+            color: #ffffff !important;
+            box-shadow: 0 4px 14px var(--accent-glow) !important;
+        }
+
         body {
             background-color: var(--bg-deep);
             background-image: 
@@ -1940,13 +2061,13 @@ HTML_TEMPLATE = """
             height: auto !important;
             min-height: 100vh;
             overflow-y: visible !important;
-            padding-bottom: 70px; /* Chừa khoảng trống cho Bottom Action Bar trên Mobile */
+            padding-bottom: 85px; /* Chừa khoảng trống cho Bottom Action Bar trên Mobile */
         }
         body.is-mobile main {
             overflow: visible !important;
             display: flex !important;
             flex-direction: column !important;
-            gap: 12px !important;
+            gap: 10px !important;
             padding: 8px !important;
         }
         body.is-mobile aside {
@@ -1954,31 +2075,69 @@ HTML_TEMPLATE = """
             max-height: none !important;
             overflow: visible !important;
         }
-        body.is-mobile aside > div:nth-child(2) {
-            max-height: 520px !important;
-        }
         body.is-mobile section {
             overflow: visible !important;
             display: flex !important;
             flex-direction: column !important;
+            gap: 10px !important;
         }
         body.is-mobile .dual-monitors-grid {
             height: auto !important;
             grid-template-columns: 1fr !important;
         }
         body.is-mobile .monitor-box {
-            min-height: 220px !important;
+            min-height: 200px !important;
+            max-height: 320px !important;
         }
         body.is-mobile .sub-table-container {
-            max-height: 480px !important;
-            overflow-y: auto !important;
+            max-height: none !important;
+            min-height: 550px !important;
+            overflow-y: visible !important;
+        }
+
+        /* MOBILE SEGMENTED VIEW CONTROLLER: GỌN GÀNG, KHÔNG BỊ TRÀN KÉO DÀI */
+        body.is-mobile.mob-view-tools #inspectorAside {
+            display: flex !important;
+        }
+        body.is-mobile.mob-view-tools #workspaceSection {
+            display: none !important;
+        }
+
+        body.is-mobile.mob-view-monitors #inspectorAside {
+            display: none !important;
+        }
+        body.is-mobile.mob-view-monitors #workspaceSection {
+            display: flex !important;
+        }
+        body.is-mobile.mob-view-monitors .dual-monitors-grid {
+            display: grid !important;
+        }
+        body.is-mobile.mob-view-monitors .sub-table-container {
+            display: none !important;
+        }
+
+        body.is-mobile.mob-view-subs #inspectorAside {
+            display: none !important;
+        }
+        body.is-mobile.mob-view-subs #workspaceSection {
+            display: flex !important;
+        }
+        body.is-mobile.mob-view-subs .dual-monitors-grid {
+            display: none !important;
+        }
+        body.is-mobile.mob-view-subs .sub-table-container {
+            display: flex !important;
+        }
+
+        body:not(.is-mobile) #mobileViewNav {
+            display: none !important;
         }
         @media (max-width: 1024px) {
             .mobile-hide-inline { display: none !important; }
         }
     </style>
 </head>
-<body class="h-screen w-screen overflow-hidden text-slate-200 font-sans select-none">
+<body class="h-screen w-screen text-slate-200 font-sans select-none {{ 'is-mobile mob-view-tools' if is_mobile_ua else '' }}">
     <!-- ==================== CỔNG ĐĂNG NHẬP LICENSE KEY (HIỂN THỊ MẶC ĐỊNH) ==================== -->
     <div id="viewLicenseGate" class="fixed inset-0 z-50 bg-[#05070f] flex items-center justify-center p-4">
         <!-- Radial ambient glow -->
@@ -2182,8 +2341,21 @@ HTML_TEMPLATE = """
 
     <!-- MAIN WORKSPACE -->
     <main class="flex-1 grid grid-cols-12 gap-3 p-3 overflow-hidden">
+        <!-- MOBILE VIEW SELECTOR (Chỉ hiện trên điện thoại: Công Cụ / Video / Phụ Đề) -->
+        <div id="mobileViewNav" class="col-span-12 flex items-center bg-[#070b18]/95 backdrop-blur-xl p-1.5 rounded-2xl border border-sky-500/30 gap-1.5 text-xs font-bold shadow-lg">
+            <button onclick="setMobileActiveView('tools')" id="mobNav_tools" class="flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-md shadow-sky-500/25">
+                <i class="fa-solid fa-sliders"></i> <span>1. Công Cụ</span>
+            </button>
+            <button onclick="setMobileActiveView('monitors')" id="mobNav_monitors" class="flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition text-slate-400 hover:text-white">
+                <i class="fa-solid fa-tv"></i> <span>2. Video</span>
+            </button>
+            <button onclick="setMobileActiveView('subs')" id="mobNav_subs" class="flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition text-slate-400 hover:text-white">
+                <i class="fa-solid fa-table-list"></i> <span>3. Phụ Đề</span>
+            </button>
+        </div>
+
         <!-- LEFT INSPECTOR (4 TABS) -->
-        <aside class="col-span-12 lg:col-span-3 studio-panel rounded-2xl flex flex-col overflow-hidden">
+        <aside id="inspectorAside" class="col-span-12 lg:col-span-3 studio-panel rounded-2xl flex flex-col overflow-hidden">
             <div class="grid grid-cols-4 gap-1 p-1.5 bg-[#060911] border-b border-slate-800/80 text-[11px] font-bold">
                 <button onclick="switchTab('tabExtract')" id="btn_tabExtract" class="nav-pill active py-2 rounded-xl flex flex-col items-center gap-0.5 transition">
                     <i class="fa-solid fa-closed-captioning"></i> <span>1. Tách Sub</span>
@@ -2444,20 +2616,20 @@ HTML_TEMPLATE = """
                         </div>
                         <div>
                             <div class="flex justify-between text-xs">
-                                <span class="text-slate-300">Độ đậm nền che mờ (Opacity)</span>
-                                <span id="blurOpacityLabel" class="text-amber-400 font-bold">40%</span>
+                                <span class="text-slate-300">Độ đậm màu dải che mờ (Opacity)</span>
+                                <span id="blurOpacityLabel" class="text-amber-400 font-bold">0% (Kính Mờ Tự Nhiên)</span>
                             </div>
-                            <input type="range" id="blurOpacity" min="0" max="100" value="40" oninput="document.getElementById('blurOpacityLabel').innerText=this.value+'%'; drawOverlayOnCanvas();" class="w-full mt-1 accent-amber-500 cursor-pointer"/>
+                            <input type="range" id="blurOpacity" min="0" max="100" value="0" oninput="document.getElementById('blurOpacityLabel').innerText=this.value+'%'+(this.value==0?' (Kính Mờ Tự Nhiên)':''); drawOverlayOnCanvas();" class="w-full mt-1 accent-amber-500 cursor-pointer"/>
                         </div>
                         <div>
                             <div class="flex justify-between text-xs">
                                 <span class="text-slate-300">Độ nhòe kính mờ (Blur Sigma)</span>
-                                <span id="blurSigmaLabel" class="text-amber-400 font-bold">16</span>
+                                <span id="blurSigmaLabel" class="text-amber-400 font-bold">14 (Mịn Tự Nhiên)</span>
                             </div>
-                            <input type="range" id="blurSigma" min="0" max="40" value="16" oninput="document.getElementById('blurSigmaLabel').innerText=this.value; drawOverlayOnCanvas();" class="w-full mt-1 accent-amber-500 cursor-pointer"/>
+                            <input type="range" id="blurSigma" min="0" max="40" value="14" oninput="document.getElementById('blurSigmaLabel').innerText=this.value+(this.value>=12?' (Mịn Tự Nhiên)':''); drawOverlayOnCanvas();" class="w-full mt-1 accent-amber-500 cursor-pointer"/>
                         </div>
                         <div class="flex items-center justify-between pt-1">
-                            <span class="text-xs text-slate-300">Màu nền dải che mờ</span>
+                            <span class="text-xs text-slate-300">Màu nền dải che mờ (chỉ khi Opacity > 0%)</span>
                             <div class="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1">
                                 <input type="color" id="blurColor" value="#000000" oninput="document.getElementById('blurColorHex').innerText=this.value; drawOverlayOnCanvas();" class="w-5 h-5 rounded"/>
                                 <span id="blurColorHex" class="text-xs mono text-slate-300">#000000</span>
@@ -2578,7 +2750,7 @@ HTML_TEMPLATE = """
         </aside>
 
         <!-- RIGHT WORKSPACE (9 COLS): DUAL MONITORS & TIMELINE -->
-        <section class="col-span-12 lg:col-span-9 flex flex-col gap-3 overflow-hidden">
+        <section id="workspaceSection" class="col-span-12 lg:col-span-9 flex flex-col gap-3 overflow-hidden">
             <div class="dual-monitors-grid grid grid-cols-1 md:grid-cols-2 gap-3 h-[335px] shrink-0">
                 <div class="studio-panel monitor-box rounded-2xl flex flex-col overflow-hidden">
                     <div class="studio-header px-3.5 py-2 flex items-center justify-between text-xs">
@@ -2713,8 +2885,8 @@ HTML_TEMPLATE = """
     </div> <!-- END viewMainStudio -->
 
     <!-- ==================== MODAL CÀI ĐẶT GIAO DIỆN & TÙY BIẾN MÀU SẮC ==================== -->
-    <div id="settingsModal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-50 hidden items-center justify-center p-4">
-        <div class="studio-panel rounded-3xl max-w-lg w-full p-6 space-y-5 border border-sky-500/30 shadow-2xl">
+    <div id="settingsModal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-50 hidden items-center justify-center p-3 sm:p-4">
+        <div class="studio-panel rounded-3xl max-w-lg w-full p-5 sm:p-6 space-y-4 max-h-[92vh] overflow-y-auto border border-sky-500/30 shadow-2xl">
             <div class="flex items-center justify-between border-b border-white/[0.08] pb-3">
                 <h3 class="text-sm font-black text-white flex items-center gap-2">
                     <i class="fa-solid fa-sliders text-sky-400"></i> Cài Đặt Giao Diện & Tùy Biến Studio
@@ -2725,35 +2897,76 @@ HTML_TEMPLATE = """
             <!-- 1. Color Themes -->
             <div class="space-y-2">
                 <label class="text-xs font-bold text-slate-300 block">🎨 Chọn Chủ Đề Màu Sắc (Accent Themes):</label>
-                <div class="grid grid-cols-3 gap-2.5">
-                    <button onclick="applyTheme('cyber')" id="theme_card_cyber" class="theme-card p-3 rounded-2xl border border-sky-500/40 bg-[#070e1c] hover:border-sky-400 flex flex-col items-center gap-1.5 text-center transition">
+                <div class="grid grid-cols-3 gap-2">
+                    <button onclick="applyTheme('cyber')" id="theme_card_cyber" class="theme-card p-2.5 rounded-2xl border border-sky-500/40 bg-[#070e1c] hover:border-sky-400 flex flex-col items-center gap-1.5 text-center transition">
                         <div class="w-6 h-6 rounded-full bg-gradient-to-tr from-sky-400 to-indigo-500 shadow-md shadow-sky-500/40"></div>
                         <span class="text-[11px] font-bold text-sky-300">Neon Cyber</span>
                     </button>
-                    <button onclick="applyTheme('violet')" id="theme_card_violet" class="theme-card p-3 rounded-2xl border border-purple-500/40 bg-[#0d071c] hover:border-purple-400 flex flex-col items-center gap-1.5 text-center transition">
+                    <button onclick="applyTheme('violet')" id="theme_card_violet" class="theme-card p-2.5 rounded-2xl border border-purple-500/40 bg-[#0d071c] hover:border-purple-400 flex flex-col items-center gap-1.5 text-center transition">
                         <div class="w-6 h-6 rounded-full bg-gradient-to-tr from-purple-500 to-fuchsia-500 shadow-md shadow-purple-500/40"></div>
                         <span class="text-[11px] font-bold text-purple-300">Royal Violet</span>
                     </button>
-                    <button onclick="applyTheme('emerald')" id="theme_card_emerald" class="theme-card p-3 rounded-2xl border border-emerald-500/40 bg-[#051610] hover:border-emerald-400 flex flex-col items-center gap-1.5 text-center transition">
+                    <button onclick="applyTheme('emerald')" id="theme_card_emerald" class="theme-card p-2.5 rounded-2xl border border-emerald-500/40 bg-[#051610] hover:border-emerald-400 flex flex-col items-center gap-1.5 text-center transition">
                         <div class="w-6 h-6 rounded-full bg-gradient-to-tr from-emerald-400 to-teal-500 shadow-md shadow-emerald-500/40"></div>
                         <span class="text-[11px] font-bold text-emerald-300">Emerald Matrix</span>
                     </button>
-                    <button onclick="applyTheme('amber')" id="theme_card_amber" class="theme-card p-3 rounded-2xl border border-amber-500/40 bg-[#191005] hover:border-amber-400 flex flex-col items-center gap-1.5 text-center transition">
+                    <button onclick="applyTheme('amber')" id="theme_card_amber" class="theme-card p-2.5 rounded-2xl border border-amber-500/40 bg-[#191005] hover:border-amber-400 flex flex-col items-center gap-1.5 text-center transition">
                         <div class="w-6 h-6 rounded-full bg-gradient-to-tr from-amber-400 to-orange-500 shadow-md shadow-amber-500/40"></div>
                         <span class="text-[11px] font-bold text-amber-300">Sunset Gold</span>
                     </button>
-                    <button onclick="applyTheme('crimson')" id="theme_card_crimson" class="theme-card p-3 rounded-2xl border border-rose-500/40 bg-[#19060b] hover:border-rose-400 flex flex-col items-center gap-1.5 text-center transition">
+                    <button onclick="applyTheme('crimson')" id="theme_card_crimson" class="theme-card p-2.5 rounded-2xl border border-rose-500/40 bg-[#19060b] hover:border-rose-400 flex flex-col items-center gap-1.5 text-center transition">
                         <div class="w-6 h-6 rounded-full bg-gradient-to-tr from-rose-500 to-red-600 shadow-md shadow-rose-500/40"></div>
                         <span class="text-[11px] font-bold text-rose-300">Ruby Crimson</span>
                     </button>
-                    <button onclick="applyTheme('obsidian')" id="theme_card_obsidian" class="theme-card p-3 rounded-2xl border border-slate-600 bg-[#090b10] hover:border-slate-400 flex flex-col items-center gap-1.5 text-center transition">
+                    <button onclick="applyTheme('obsidian')" id="theme_card_obsidian" class="theme-card p-2.5 rounded-2xl border border-slate-600 bg-[#090b10] hover:border-slate-400 flex flex-col items-center gap-1.5 text-center transition">
                         <div class="w-6 h-6 rounded-full bg-gradient-to-tr from-slate-400 to-slate-200 shadow-md shadow-slate-400/40"></div>
                         <span class="text-[11px] font-bold text-slate-300">Obsidian Slate</span>
                     </button>
                 </div>
             </div>
 
-            <!-- 2. UI Subtitle Preview Font Size -->
+            <!-- 2. Google Gemini API Key Pool & Check Direct in Settings -->
+            <div class="space-y-2.5 pt-3 border-t border-white/[0.08]">
+                <div class="flex items-center justify-between">
+                    <label class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                        <i class="fa-solid fa-key text-amber-400"></i> Khóa Google Gemini API (Multi-Key Pool):
+                    </label>
+                    <span id="settingsKeyCountBadge" class="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold mono">0 Key</span>
+                </div>
+                <textarea id="settingsGeminiKeys" rows="3" oninput="syncSettingsKeysToTab()" placeholder="AIzaSy... (Dán 1 hoặc nhiều API key, mỗi dòng 1 key để tự động đảo khi hết quota)" class="w-full bg-slate-950/90 border border-slate-700/80 focus:border-sky-500 rounded-xl p-2.5 text-xs text-sky-200 mono outline-none resize-none"></textarea>
+                
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                        <label class="text-[10px] text-slate-400 block mb-0.5">Model Gemini Mặc Định:</label>
+                        <select id="settingsGeminiModel" onchange="document.getElementById('geminiModel').value=this.value" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-bold text-sky-300 outline-none">
+                            <option value="gemini-3.5-flash" selected>Gemini 3.5 Flash (Khuyên Dùng)</option>
+                            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (Tiết Kiệm)</option>
+                            <option value="gemini-3.8-flash">Gemini 3.8 Flash (Mới Nhất)</option>
+                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        </select>
+                    </div>
+                    <div class="flex items-end">
+                        <button id="btnTestGeminiInSettings" onclick="testGeminiKeysFromSettings()" class="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500/30 hover:to-orange-500/30 border border-amber-500/40 text-amber-300 text-xs font-bold flex items-center justify-center gap-1.5 transition">
+                            <i class="fa-solid fa-vial-circle-check"></i> Kiểm Tra Tất Cả Key
+                        </button>
+                    </div>
+                </div>
+
+                <div id="settingsGeminiResults" class="hidden rounded-xl bg-slate-950 p-2.5 border border-slate-800 space-y-1.5"></div>
+            </div>
+
+            <!-- 3. Multi-Tenant Workspace Info -->
+            <div class="p-3 rounded-2xl bg-sky-950/30 border border-sky-500/30 flex items-center justify-between">
+                <div>
+                    <div class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i class="fa-solid fa-layer-group text-sky-400"></i> Workspace Riêng Biệt Của Bạn:
+                    </div>
+                    <div class="text-[11px] text-slate-400 mt-0.5">Tách biệt 100% video, sub và dự án với người khác</div>
+                </div>
+                <span id="settingsWsIdBadge" class="px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-300 text-xs font-bold mono">ws_default</span>
+            </div>
+
+            <!-- 4. UI Subtitle Preview Font Size -->
             <div class="space-y-2 pt-2 border-t border-white/[0.08]">
                 <label class="text-xs font-bold text-slate-300 block">🔤 Cỡ chữ hiển thị trong Bảng Phụ Đề Preview:</label>
                 <div class="grid grid-cols-3 gap-2">
@@ -2763,7 +2976,7 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- 3. Cloud Worker Configuration Quick Button -->
+            <!-- 5. Cloud Worker Configuration Quick Button -->
             <div class="p-3.5 rounded-2xl bg-indigo-950/40 border border-indigo-500/30 flex items-center justify-between">
                 <div>
                     <div class="text-xs font-bold text-white flex items-center gap-1.5">
@@ -2777,7 +2990,7 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="flex justify-end pt-1">
-                <button onclick="closeSettingsModal()" class="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 text-white text-xs font-bold transition">Đóng & Áp Dụng</button>
+                <button onclick="closeSettingsModal()" class="px-5 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 text-white text-xs font-bold shadow-lg shadow-sky-500/25 transition">Đóng & Áp Dụng</button>
             </div>
         </div>
     </div>
@@ -2967,17 +3180,31 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- MOBILE STICKY BOTTOM ACTION BAR -->
-    <div id="mobileBottomBar" class="fixed bottom-0 inset-x-0 z-40 bg-[#070914]/95 backdrop-blur-xl border-t border-white/[0.1] px-4 py-2.5 flex items-center justify-between gap-3 shadow-2xl hidden">
-        <div class="flex items-center gap-2">
-            <span id="mobileBottomBadge" class="text-[11px] font-bold text-amber-300 mono">0/50</span>
-            <span id="mobileBottomStatus" class="text-[11px] text-slate-400 truncate max-w-[130px]">Sẵn sàng</span>
+    <!-- MOBILE FLOATING PROGRESS HUD (Thanh tiến độ trực quan, lớn & rõ ràng trên điện thoại) -->
+    <div id="mobileProgressHUD" class="fixed bottom-14 inset-x-2.5 z-40 bg-[#060a18]/95 backdrop-blur-2xl border border-sky-500/40 rounded-2xl p-3 shadow-2xl space-y-2 hidden">
+        <div class="flex items-center justify-between text-xs">
+            <div class="flex items-center gap-2 overflow-hidden flex-1 mr-2">
+                <i id="mobStatusSpinner" class="fa-solid fa-circle-notch fa-spin text-sky-400 text-sm"></i>
+                <span id="mobStatusText" class="font-bold text-slate-100 truncate">Sẵn sàng</span>
+            </div>
+            <span id="mobStatusPercent" class="font-black text-sky-400 mono text-sm shrink-0">0%</span>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="w-full h-2 bg-slate-900 rounded-full overflow-hidden p-[1px] border border-white/[0.08]">
+            <div id="mobProgressBar" class="h-full bg-gradient-to-r from-sky-400 via-indigo-500 to-emerald-400 rounded-full transition-all duration-300" style="width: 0%"></div>
+        </div>
+    </div>
+
+    <!-- MOBILE STICKY BOTTOM ACTION BAR -->
+    <div id="mobileBottomBar" class="fixed bottom-0 inset-x-0 z-40 bg-[#070914]/95 backdrop-blur-xl border-t border-white/[0.1] px-3.5 py-2 flex items-center justify-between gap-2 shadow-2xl hidden">
+        <div class="flex items-center gap-2 overflow-hidden flex-1 mr-2">
+            <span id="mobileBottomBadge" class="text-[11px] font-bold text-amber-300 mono bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/30 shrink-0">0/50</span>
+            <span id="mobileBottomStatus" class="text-[11px] text-slate-300 truncate">Sẵn sàng</span>
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
             <button onclick="runAllSteps()" class="px-3.5 py-2 rounded-xl bg-gradient-to-r from-sky-500 via-indigo-600 to-purple-600 active:scale-95 text-white text-xs font-black shadow-lg shadow-sky-500/25 flex items-center gap-1.5">
                 <i class="fa-solid fa-bolt"></i> A → Z
             </button>
-            <a id="mobileDownloadBtn" href="/temp_session/output_vietsub.mp4" download="output_vietsub.mp4" class="hidden px-3 py-2 rounded-xl bg-emerald-500 text-slate-950 text-xs font-black flex items-center gap-1">
+            <a id="mobileDownloadBtn" href="/temp_session/output_vietsub.mp4" download="output_vietsub.mp4" class="hidden px-3 py-2 rounded-xl bg-emerald-500 text-slate-950 text-xs font-black flex items-center gap-1 shadow-lg shadow-emerald-500/25">
                 <i class="fa-solid fa-download"></i> Tải
             </a>
         </div>
@@ -3547,16 +3774,29 @@ HTML_TEMPLATE = """
                 const dw = blurRect.w * scaleX;
                 const dh = blurRect.h * scaleY;
 
-                const opacity = parseInt(document.getElementById('blurOpacity').value || 40) / 100.0;
+                const opacity = parseInt(document.getElementById('blurOpacity').value || 0) / 100.0;
                 const blurColor = document.getElementById('blurColor').value || '#000000';
 
-                ctx.fillStyle = hexToRgba(blurColor, opacity);
+                if (opacity > 0.02) {
+                    ctx.fillStyle = hexToRgba(blurColor, opacity);
+                    ctx.fillRect(dx, dy, dw, dh);
+                } else {
+                    // Mặc định Kính Mờ Tự Nhiên: trong suốt không màu, giữ nguyên nền video
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+                    ctx.fillRect(dx, dy, dw, dh);
+                }
                 ctx.strokeStyle = extractMode === 'ocr' ? '#38bdf8' : '#f59e0b';
                 ctx.lineWidth = 1.5;
                 ctx.setLineDash([5, 3]);
-                ctx.fillRect(dx, dy, dw, dh);
                 ctx.strokeRect(dx, dy, dw, dh);
                 ctx.setLineDash([]);
+
+                // Nhãn chỉ dẫn chế độ kính mờ
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(dx + 3, dy + 3, 136, 17);
+                ctx.fillStyle = '#fef08a';
+                ctx.font = 'bold 9px sans-serif';
+                ctx.fillText(opacity <= 0.02 ? '✨ Kính Mờ Tự Nhiên' : `Mờ Tint ${Math.round(opacity*100)}%`, dx + 7, dy + 15);
             }
 
             const assScale = canvas.height / 720.0;
@@ -3624,8 +3864,8 @@ HTML_TEMPLATE = """
                 targetLangLabel: lInfo.lang_label,
                 googleLangCode: lInfo.google_code,
                 blurRect,
-                blurOpacity: parseInt(document.getElementById('blurOpacity').value || 40),
-                blurSigma: parseInt(document.getElementById('blurSigma').value || 16),
+                blurOpacity: parseInt(document.getElementById('blurOpacity').value || 0),
+                blurSigma: parseInt(document.getElementById('blurSigma').value || 14),
                 blurColor: document.getElementById('blurColor').value || '#000000',
                 fontName: document.getElementById('fontName').value || 'Arial',
                 fontSize: parseInt(document.getElementById('fontSize').value || 22),
@@ -3668,11 +3908,11 @@ HTML_TEMPLATE = """
             updateBoxLabels();
             if (st.blurOpacity !== undefined) {
                 document.getElementById('blurOpacity').value = st.blurOpacity;
-                document.getElementById('blurOpacityLabel').innerText = st.blurOpacity + '%';
+                document.getElementById('blurOpacityLabel').innerText = st.blurOpacity + '%' + (st.blurOpacity == 0 ? ' (Kính Mờ Tự Nhiên)' : '');
             }
             if (st.blurSigma !== undefined) {
                 document.getElementById('blurSigma').value = st.blurSigma;
-                document.getElementById('blurSigmaLabel').innerText = st.blurSigma;
+                document.getElementById('blurSigmaLabel').innerText = st.blurSigma + (st.blurSigma >= 12 ? ' (Mịn Tự Nhiên)' : '');
             }
             if (st.blurColor) {
                 document.getElementById('blurColor').value = st.blurColor;
@@ -4462,10 +4702,20 @@ HTML_TEMPLATE = """
             document.documentElement.setAttribute('data-theme', name);
             localStorage.setItem('nexus_theme', name);
             document.querySelectorAll('.theme-card').forEach(c => {
-                c.classList.remove('ring-2', 'ring-sky-400', 'ring-purple-400');
+                c.classList.remove('ring-2', 'ring-sky-400', 'ring-purple-400', 'ring-emerald-400', 'ring-amber-400', 'ring-rose-400', 'ring-slate-400');
             });
             const sel = document.getElementById('theme_card_' + name);
             if (sel) sel.classList.add('ring-2', 'ring-sky-400');
+            
+            const themeNames = {
+                cyber: "Neon Cyber",
+                violet: "Royal Violet",
+                emerald: "Emerald Matrix",
+                amber: "Sunset Gold",
+                crimson: "Ruby Crimson",
+                obsidian: "Obsidian Slate"
+            };
+            showToast(`🎨 Đã áp dụng chủ đề màu [${themeNames[name] || name}]!`, 2000);
         }
 
         function openSettingsModal() {
@@ -4474,11 +4724,106 @@ HTML_TEMPLATE = """
             const curTheme = localStorage.getItem('nexus_theme') || 'cyber';
             const sel = document.getElementById('theme_card_' + curTheme);
             if (sel) sel.classList.add('ring-2', 'ring-sky-400');
+
+            // Đồng bộ Gemini API Keys
+            const savedKeys = localStorage.getItem('gemini_api_keys_list') || localStorage.getItem('gemini_api_key') || (document.getElementById('geminiKeys') ? document.getElementById('geminiKeys').value : '');
+            const sKeys = document.getElementById('settingsGeminiKeys');
+            if (sKeys) {
+                sKeys.value = savedKeys;
+                updateSettingsKeyCount();
+            }
+
+            // Đồng bộ Model Gemini
+            const curModel = document.getElementById('geminiModel') ? document.getElementById('geminiModel').value : 'gemini-3.5-flash';
+            const sModel = document.getElementById('settingsGeminiModel');
+            if (sModel) sModel.value = curModel;
+
+            // Đồng bộ Workspace ID
+            const token = localStorage.getItem('nexus_session_token') || '';
+            const wsName = token ? token.split('|')[0] : 'Chung (Default)';
+            const wsBadge = document.getElementById('settingsWsIdBadge');
+            if (wsBadge) wsBadge.innerText = 'ws_' + wsName;
+            const hBadge = document.getElementById('activeWorkspaceName');
+            if (hBadge) hBadge.innerText = wsName;
         }
 
         function closeSettingsModal() {
             const m = document.getElementById('settingsModal');
             if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+        }
+
+        function updateSettingsKeyCount() {
+            const sKeys = document.getElementById('settingsGeminiKeys');
+            if (!sKeys) return;
+            const lines = sKeys.value.split(/[\n,;]+/).map(s => s.trim()).filter(s => s.length > 10);
+            const badge = document.getElementById('settingsKeyCountBadge');
+            if (badge) badge.innerText = `${lines.length} Key`;
+        }
+
+        function syncSettingsKeysToTab() {
+            const sKeys = document.getElementById('settingsGeminiKeys');
+            if (!sKeys) return;
+            const val = sKeys.value.trim();
+            localStorage.setItem('gemini_api_keys_list', val);
+            const mainKeys = document.getElementById('geminiKeys');
+            if (mainKeys) {
+                mainKeys.value = val;
+                updateKeyCount();
+            }
+            updateSettingsKeyCount();
+        }
+
+        async function testGeminiKeysFromSettings() {
+            syncSettingsKeysToTab();
+            const sKeys = document.getElementById('settingsGeminiKeys');
+            const val = (sKeys ? sKeys.value : '').trim();
+            if (!val) {
+                alert("Vui lòng nhập ít nhất 1 API Key Google Gemini để kiểm tra!");
+                return;
+            }
+            const btn = document.getElementById('btnTestGeminiInSettings');
+            const resBox = document.getElementById('settingsGeminiResults');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang test kết nối Gemini...';
+            }
+            if (resBox) {
+                resBox.classList.remove('hidden');
+                resBox.innerHTML = '<div class="text-xs text-sky-400 p-2 flex items-center gap-2"><i class="fa-solid fa-circle-notch fa-spin"></i> Đang gửi yêu cầu test tới Google API...</div>';
+            }
+            try {
+                const res = await fetch('/api/gemini/validate_keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ keys: val })
+                });
+                const data = await res.json();
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa-solid fa-vial-circle-check"></i> Kiểm Tra Tất Cả Key';
+                }
+                if (!data.results || !data.results.length) {
+                    if (resBox) resBox.innerHTML = `<div class="text-xs text-rose-400 p-2">${data.error || 'Không tìm thấy key hợp lệ để test'}</div>`;
+                    return;
+                }
+                let html = '<div class="space-y-1.5 max-h-36 overflow-y-auto pr-1">';
+                data.results.forEach(r => {
+                    const isOk = r.valid;
+                    html += `<div class="p-2 rounded-xl flex items-center justify-between text-xs ${isOk ? 'bg-emerald-950/50 border border-emerald-500/40 text-emerald-300' : 'bg-rose-950/50 border border-rose-500/40 text-rose-300'}">
+                        <span class="mono font-semibold">${r.key}</span>
+                        <span class="font-bold flex items-center gap-1">${isOk ? '<i class="fa-solid fa-circle-check"></i> ' : '<i class="fa-solid fa-triangle-exclamation"></i> '}${r.status}</span>
+                    </div>`;
+                });
+                html += '</div>';
+                if (resBox) resBox.innerHTML = html;
+                showToast(`✅ Đã kiểm tra: ${data.valid_count}/${data.results.length} key Gemini hoạt động tốt!`);
+            } catch (e) {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa-solid fa-vial-circle-check"></i> Kiểm Tra Tất Cả Key';
+                }
+                if (resBox) resBox.innerHTML = `<div class="text-xs text-rose-400 p-2">Lỗi: ${e.message}</div>`;
+            }
         }
 
         function setSubFontSize(sz) {
@@ -4937,31 +5282,79 @@ HTML_TEMPLATE = """
 
         function setStatus(percent, msg) {
             const p = Math.max(0, Math.min(100, parseInt(percent || 0)));
-            document.getElementById('progressBar').style.width = p + '%';
-            document.getElementById('statusPercent').innerText = p + '%';
-            document.getElementById('statusText').innerText = msg;
+            const bar = document.getElementById('progressBar');
+            if (bar) bar.style.width = p + '%';
+            const pct = document.getElementById('statusPercent');
+            if (pct) pct.innerText = p + '%';
+            const txt = document.getElementById('statusText');
+            if (txt) txt.innerText = msg;
+
+            // Cập nhật thanh tiến độ trực quan trên Điện thoại
             const mobStatus = document.getElementById('mobileBottomStatus');
             if (mobStatus) mobStatus.innerText = msg;
+            const mobBar = document.getElementById('mobProgressBar');
+            if (mobBar) mobBar.style.width = p + '%';
+            const mobPct = document.getElementById('mobStatusPercent');
+            if (mobPct) mobPct.innerText = p + '%';
+            const mobTxt = document.getElementById('mobStatusText');
+            if (mobTxt) mobTxt.innerText = msg;
+
+            const hud = document.getElementById('mobileProgressHUD');
+            if (hud && isMobileDevice) {
+                if (p > 0 && p < 100) {
+                    hud.classList.remove('hidden');
+                } else if (p >= 100) {
+                    hud.classList.remove('hidden');
+                    setTimeout(() => {
+                        if (hud) hud.classList.add('hidden');
+                    }, 12000);
+                } else {
+                    hud.classList.add('hidden');
+                }
+            }
         }
 
         // ================= TỰ ĐỘNG NHẬN DIỆN & TÙY CHỌN GIAO DIỆN ĐIỆN THOẠI / MÁY TÍNH =================
+        let mobileActiveView = 'tools'; // 'tools' | 'monitors' | 'subs'
+        function setMobileActiveView(view) {
+            mobileActiveView = view;
+            const body = document.body;
+            body.classList.remove('mob-view-tools', 'mob-view-monitors', 'mob-view-subs');
+            body.classList.add('mob-view-' + view);
+
+            const btnTools = document.getElementById('mobNav_tools');
+            const btnMons = document.getElementById('mobNav_monitors');
+            const btnSubs = document.getElementById('mobNav_subs');
+
+            const activeClass = "bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-md shadow-sky-500/25";
+            const inactiveClass = "text-slate-400 hover:text-white";
+
+            [btnTools, btnMons, btnSubs].forEach(b => {
+                if (!b) return;
+                b.className = "flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition " + inactiveClass;
+            });
+
+            if (view === 'tools' && btnTools) btnTools.className = "flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition " + activeClass;
+            if (view === 'monitors' && btnMons) btnMons.className = "flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition " + activeClass;
+            if (view === 'subs' && btnSubs) btnSubs.className = "flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition " + activeClass;
+        }
+
         let isMobileDevice = false;
 
         function detectDeviceMode() {
-            const savedPref = localStorage.getItem('nexus_device_mode');
-            if (savedPref === 'mobile') {
-                applyDeviceMode(true);
-                return;
-            } else if (savedPref === 'desktop') {
-                applyDeviceMode(false);
-                return;
-            }
-
-            // Tự động nhận diện dựa trên User Agent hoặc kích thước màn hình
             const ua = navigator.userAgent || '';
             const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
             const isSmallScreen = window.innerWidth < 1024;
-            applyDeviceMode(isMobileUA || isSmallScreen);
+            const savedPref = localStorage.getItem('nexus_device_mode');
+
+            // Tự động nhận diện: Nếu truy cập bằng điện thoại di động (UA Mobile), tự động bật giao diện Mobile
+            if (savedPref === 'mobile' || (!savedPref && (isMobileUA || isSmallScreen))) {
+                applyDeviceMode(true);
+            } else if (savedPref === 'desktop' && !isMobileUA) {
+                applyDeviceMode(false);
+            } else {
+                applyDeviceMode(isMobileUA || isSmallScreen);
+            }
         }
 
         function applyDeviceMode(mobile) {
@@ -4971,17 +5364,23 @@ HTML_TEMPLATE = """
             const icon = document.getElementById('deviceModeIcon');
             const text = document.getElementById('deviceModeText');
             const mobBar = document.getElementById('mobileBottomBar');
+            const mobNav = document.getElementById('mobileViewNav');
 
             if (mobile) {
                 body.classList.add('is-mobile');
+                setMobileActiveView(mobileActiveView || 'tools');
                 if (icon) icon.className = "fa-solid fa-desktop text-emerald-400";
                 if (text) text.innerText = "Desktop";
                 if (mobBar) mobBar.classList.remove('hidden');
+                if (mobNav) mobNav.classList.remove('hidden');
             } else {
-                body.classList.remove('is-mobile');
+                body.classList.remove('is-mobile', 'mob-view-tools', 'mob-view-monitors', 'mob-view-subs');
                 if (icon) icon.className = "fa-solid fa-mobile-screen text-sky-400";
                 if (text) text.innerText = "Mobile";
                 if (mobBar) mobBar.classList.add('hidden');
+                if (mobNav) mobNav.classList.add('hidden');
+                const hud = document.getElementById('mobileProgressHUD');
+                if (hud) hud.classList.add('hidden');
             }
         }
 
@@ -5015,11 +5414,20 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    ua = request.user_agent.string if request.user_agent else ""
+    is_mob = bool(re.search(r"Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile", ua, re.I))
+    ws_id = get_workspace_id(request)
+    return render_template_string(HTML_TEMPLATE, is_mobile_ua=is_mob, current_ws_id=ws_id)
 
 @app.route("/progress")
+@app.route("/api/progress")
 def get_progress():
-    return jsonify(PROGRESS_STATE)
+    ws_id = get_workspace_id(request)
+    with PROGRESS_LOCK:
+        if ws_id and ws_id in WORKSPACE_PROGRESS:
+            p = WORKSPACE_PROGRESS[ws_id]
+            return jsonify({"percent": p.get("percent", 0), "message": p.get("message", "Sẵn sàng"), "workspace": ws_id})
+        return jsonify({"percent": PROGRESS_STATE["percent"], "message": PROGRESS_STATE["message"], "workspace": "default"})
 
 @app.route("/api/tunnel/info")
 def api_tunnel_info():
@@ -5087,6 +5495,18 @@ def api_tts_preview():
 
 @app.route("/temp_session/<path:filename>")
 def serve_temp(filename):
+    ws_dir = get_workspace_dir(request)
+    file_ws = os.path.join(ws_dir, filename)
+    if os.path.exists(file_ws):
+        return send_from_directory(ws_dir, filename, conditional=True)
+    return send_from_directory(TEMP_DIR, filename, conditional=True)
+
+@app.route("/workspace/<ws_id>/<path:filename>")
+def serve_workspace_file(ws_id, filename):
+    safe_ws = re.sub(r'[^a-zA-Z0-9_\-]', '_', ws_id)[:32]
+    target_dir = os.path.join(WORKSPACES_ROOT, f"ws_{safe_ws}")
+    if os.path.exists(os.path.join(target_dir, filename)):
+        return send_from_directory(target_dir, filename, conditional=True)
     return send_from_directory(TEMP_DIR, filename, conditional=True)
 
 @app.route("/api/cloud/config", methods=["GET", "POST"])
@@ -5388,6 +5808,25 @@ def api_relay_upload_chunk(job_id):
         except Exception:
             pass
 
+        ws_id = None
+        with SERVER_JOBS_LOCK:
+            if job_id in ACTIVE_SERVER_JOBS:
+                ws_id = ACTIVE_SERVER_JOBS[job_id].get("workspace_id")
+        if not ws_id:
+            try:
+                with open(os.path.join(job_dir, "state.json"), "r", encoding="utf-8") as f_st:
+                    ws_id = json.load(f_st).get("workspace_id")
+            except Exception:
+                pass
+
+        if ws_id:
+            ws_target = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+            os.makedirs(ws_target, exist_ok=True)
+            try:
+                shutil.copy2(out_path, os.path.join(ws_target, "output_vietsub.mp4"))
+            except Exception:
+                pass
+
         segs = []
         seg_json = request.form.get("segments_json")
         if seg_json:
@@ -5395,12 +5834,14 @@ def api_relay_upload_chunk(job_id):
                 segs = json.loads(seg_json)
                 ACTIVE_CLOUD_JOB["segments"] = segs
                 generate_vtt_file(os.path.join(TEMP_DIR, "sub_vi.vtt"), segs)
+                if ws_id:
+                    generate_vtt_file(os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}", "sub_vi.vtt"), segs)
             except Exception:
                 pass
 
         ACTIVE_CLOUD_JOB["output_ready"] = True
         ACTIVE_CLOUD_JOB["status"] = "completed"
-        update_progress(100, "🎉 Đã nhận đầy đủ Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!")
+        update_progress(100, "🎉 Đã nhận đầy đủ Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!", ws_id=ws_id)
 
         out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
         gf_url = request.form.get("gofile_url", "")
@@ -5449,6 +5890,25 @@ def api_relay_upload_result(job_id):
     except Exception:
         pass
 
+    ws_id = None
+    with SERVER_JOBS_LOCK:
+        if job_id in ACTIVE_SERVER_JOBS:
+            ws_id = ACTIVE_SERVER_JOBS[job_id].get("workspace_id")
+    if not ws_id:
+        try:
+            with open(os.path.join(job_dir, "state.json"), "r", encoding="utf-8") as f_st:
+                ws_id = json.load(f_st).get("workspace_id")
+        except Exception:
+            pass
+
+    if ws_id:
+        ws_target = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+        os.makedirs(ws_target, exist_ok=True)
+        try:
+            shutil.copy2(out_path, os.path.join(ws_target, "output_vietsub.mp4"))
+        except Exception:
+            pass
+
     segs = []
     seg_json = request.form.get("segments_json")
     if seg_json:
@@ -5456,12 +5916,14 @@ def api_relay_upload_result(job_id):
             segs = json.loads(seg_json)
             ACTIVE_CLOUD_JOB["segments"] = segs
             generate_vtt_file(os.path.join(TEMP_DIR, "sub_vi.vtt"), segs)
+            if ws_id:
+                generate_vtt_file(os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}", "sub_vi.vtt"), segs)
         except Exception:
             pass
 
     ACTIVE_CLOUD_JOB["output_ready"] = True
     ACTIVE_CLOUD_JOB["status"] = "completed"
-    update_progress(100, "🎉 Đã nhận Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!")
+    update_progress(100, "🎉 Đã nhận Video thành phẩm từ Cloud & Tự động ngắt phiên Cloud!", ws_id=ws_id)
 
     out_url = f"/api/pipeline/job_video/{job_id}/output_vietsub.mp4"
     gf_url = request.form.get("gofile_url", "")
@@ -5518,45 +5980,58 @@ def api_relay_fail(job_id):
 
 @app.route("/api/session/reset", methods=["POST"])
 def api_reset_session():
-    reset_temp_session()
-    update_progress(0, "Đã làm mới phiên làm việc")
-    return jsonify({"status": "ok"})
+    ws_id = get_workspace_id(request)
+    reset_user_workspace(ws_id)
+    update_progress(0, "Đã làm mới phiên làm việc của bạn", ws_id=ws_id)
+    return jsonify({"status": "ok", "workspace": ws_id})
 
 @app.route("/api/projects/list")
 def api_list_projects():
     projects = []
-    if os.path.exists(PROJECTS_DIR):
-        for folder in os.listdir(PROJECTS_DIR):
-            p_dir = os.path.join(PROJECTS_DIR, folder)
-            meta_file = os.path.join(p_dir, "project.json")
-            if os.path.isdir(p_dir) and os.path.exists(meta_file):
-                try:
-                    with open(meta_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    projects.append({
-                        "id": folder,
-                        "name": data.get("name", folder),
-                        "updated_at": data.get("updated_at", ""),
-                        "sub_count": len(data.get("segments", [])),
-                        "has_video": os.path.exists(os.path.join(p_dir, "video.mp4"))
-                    })
-                except Exception:
+    ws_dir = get_workspace_dir(request)
+    scan_dirs = [os.path.join(ws_dir, "projects"), PROJECTS_DIR]
+    seen_ids = set()
+
+    for p_root in scan_dirs:
+        if os.path.exists(p_root):
+            for folder in os.listdir(p_root):
+                if folder in seen_ids:
                     continue
+                p_dir = os.path.join(p_root, folder)
+                meta_file = os.path.join(p_dir, "project.json")
+                if os.path.isdir(p_dir) and os.path.exists(meta_file):
+                    try:
+                        with open(meta_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        projects.append({
+                            "id": folder,
+                            "name": data.get("name", folder),
+                            "updated_at": data.get("updated_at", ""),
+                            "sub_count": len(data.get("segments", [])),
+                            "has_video": os.path.exists(os.path.join(p_dir, "video.mp4"))
+                        })
+                        seen_ids.add(folder)
+                    except Exception:
+                        continue
     projects.sort(key=lambda x: x["updated_at"], reverse=True)
     return jsonify({"projects": projects})
 
 @app.route("/api/projects/save", methods=["POST"])
 def api_save_project():
-    data = request.json
+    data = request.json or {}
     pid = data.get("project_id") or datetime.now().strftime("proj_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:4]
     name = data.get("name", "Dự án chưa đặt tên")
     segments = data.get("segments", [])
     settings = data.get("settings", {})
 
-    p_dir = os.path.join(PROJECTS_DIR, pid)
+    ws_dir = get_workspace_dir(request)
+    p_dir = os.path.join(ws_dir, "projects", pid)
     os.makedirs(p_dir, exist_ok=True)
 
-    temp_video = os.path.join(TEMP_DIR, "input_video.mp4")
+    temp_video = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(temp_video):
+        temp_video = os.path.join(TEMP_DIR, "input_video.mp4")
+
     proj_video = os.path.join(p_dir, "video.mp4")
     if os.path.exists(temp_video):
         if not os.path.exists(proj_video) or os.path.getsize(temp_video) != os.path.getsize(proj_video):
@@ -5576,19 +6051,25 @@ def api_save_project():
 
 @app.route("/api/projects/load/<pid>", methods=["POST"])
 def api_load_project(pid):
-    p_dir = os.path.join(PROJECTS_DIR, pid)
+    ws_dir = get_workspace_dir(request)
+    p_dir = os.path.join(ws_dir, "projects", pid)
     meta_file = os.path.join(p_dir, "project.json")
+    if not os.path.exists(meta_file):
+        p_dir = os.path.join(PROJECTS_DIR, pid)
+        meta_file = os.path.join(p_dir, "project.json")
     if not os.path.exists(meta_file):
         return jsonify({"error": "Không tìm thấy dự án này!"}), 404
 
-    reset_temp_session()
+    reset_user_workspace(get_workspace_id(request))
     with open(meta_file, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
     proj_video = os.path.join(p_dir, "video.mp4")
+    ws_video = os.path.join(ws_dir, "input_video.mp4")
     temp_video = os.path.join(TEMP_DIR, "input_video.mp4")
     has_video = False
     if os.path.exists(proj_video):
+        shutil.copy2(proj_video, ws_video)
         shutil.copy2(proj_video, temp_video)
         has_video = True
 
@@ -5634,15 +6115,23 @@ def upload_video():
     file = request.files.get("video")
     if not file:
         return jsonify({"error": "Không tìm thấy file video"}), 400
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    ws_dir = get_workspace_dir(request)
+    video_path = os.path.join(ws_dir, "input_video.mp4")
     file.save(video_path)
+    try:
+        shutil.copy2(video_path, os.path.join(TEMP_DIR, "input_video.mp4"))
+    except Exception:
+        pass
     LAST_AUDIO_SIGNATURE["sig"] = None
     audio_ok = has_audio_stream(video_path)
-    return jsonify({"status": "ok", "video_url": "/temp_session/input_video.mp4", "has_audio": audio_ok})
+    return jsonify({"status": "ok", "video_url": "/temp_session/input_video.mp4", "has_audio": audio_ok, "workspace": get_workspace_id(request)})
 
 @app.route("/merge_audio", methods=["POST"])
 def merge_audio():
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    ws_dir = get_workspace_dir(request)
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path):
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
     if not os.path.exists(video_path):
         return jsonify({"error": "Vui lòng chọn file Video trước khi ghép Audio!"}), 400
 
@@ -5651,8 +6140,8 @@ def merge_audio():
         return jsonify({"error": "Không tìm thấy file audio"}), 400
 
     ext = os.path.splitext(file.filename)[1] or ".m4a"
-    audio_path = os.path.join(TEMP_DIR, f"raw_audio{ext}")
-    merged_path = os.path.join(TEMP_DIR, "merged_temp.mp4")
+    audio_path = os.path.join(ws_dir, f"raw_audio{ext}")
+    merged_path = os.path.join(ws_dir, "merged_temp.mp4")
     file.save(audio_path)
 
     cmd = [
@@ -5665,6 +6154,10 @@ def merge_audio():
         return jsonify({"error": f"Không thể ghép Audio: {proc.stderr[-300:]}"}), 500
 
     os.replace(merged_path, video_path)
+    try:
+        shutil.copy2(video_path, os.path.join(TEMP_DIR, "input_video.mp4"))
+    except Exception:
+        pass
     return jsonify({"status": "ok", "video_url": "/temp_session/input_video.mp4"})
 
 @app.route("/upload_srt", methods=["POST"])
@@ -5771,7 +6264,10 @@ def do_transcribe_core(video_path, model_size="small", device_req="auto", source
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe_video_local():
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    ws_dir = get_workspace_dir(request)
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path):
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
     if not os.path.exists(video_path):
         return jsonify({"error": "Vui lòng tải video lên trước!"}), 400
 
@@ -6277,8 +6773,8 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
     target_lang = settings.get("targetLang", "vi")
     google_lang_code = settings.get("googleLangCode", target_lang)
     blur_rect = settings.get("blurRect", {"x": 0, "y": 0, "w": 0, "h": 0})
-    blur_opacity = float(settings.get("blurOpacity", 40)) / 100.0
-    blur_sigma = int(settings.get("blurSigma", 16))
+    blur_opacity = float(settings.get("blurOpacity", 0)) / 100.0
+    blur_sigma = int(settings.get("blurSigma", 14))
     blur_color = str(settings.get("blurColor", "#000000")).lstrip("#")
 
     font_name = settings.get("fontName", "Arial")
@@ -6550,22 +7046,33 @@ def render_local_video():
     if not segments:
         return jsonify({"error": "Chưa có danh sách phụ đề để render!"}), 400
 
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    ws_dir = get_workspace_dir(request)
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path):
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
     if not os.path.exists(video_path):
         return jsonify({"error": "Không tìm thấy video gốc!"}), 400
 
+    out_file = os.path.join(ws_dir, "output_vietsub.mp4")
     try:
-        res = do_render_core(segments, data, video_path=video_path, output_path=os.path.join(TEMP_DIR, "output_vietsub.mp4"), work_dir=TEMP_DIR)
+        res = do_render_core(segments, data, video_path=video_path, output_path=out_file, work_dir=ws_dir)
+        try:
+            shutil.copy2(out_file, os.path.join(TEMP_DIR, "output_vietsub.mp4"))
+        except Exception:
+            pass
         return jsonify({"status": "ok", "render_mode": res.get("render_mode", "hybrid_gpu"), "badge_label": res.get("badge_label", "Hoàn tất 100%"), "output_url": "/temp_session/output_vietsub.mp4"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 # ==================== MODULE 12: HỆ THỐNG NỀN TẢNG 24/7 & BẢO MẬT BẢN QUYỀN ====================
 
-def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_segments, device_id, target_hw="github"):
+def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_segments, device_id, target_hw="github", ws_id=None):
     job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}") if ws_id else TEMP_DIR
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path):
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
     job_video_path = os.path.join(job_dir, "input_video.mp4")
 
     if os.path.exists(video_path) and not os.path.exists(job_video_path):
@@ -6582,11 +7089,13 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
             job = ACTIVE_SERVER_JOBS.get(job_id, {
                 "job_id": job_id,
                 "device_id": device_id,
+                "workspace_id": ws_id,
                 "created_at": datetime.now().isoformat()
             })
             job["percent"] = int(pct)
             job["message"] = str(msg or "")
             job["source_url"] = source_url
+            job["workspace_id"] = ws_id
             job["updated_at"] = datetime.now().isoformat()
             if step: job["step"] = step
             if status: job["status"] = status
@@ -6597,6 +7106,7 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
             if output_url: job["output_url"] = output_url
             if segments is not None: job["segments"] = segments
             ACTIVE_SERVER_JOBS[job_id] = job
+            update_progress(pct, msg, ws_id=ws_id)
             try:
                 with open(os.path.join(job_dir, "state.json"), "w", encoding="utf-8") as f:
                     json.dump(job, f, ensure_ascii=False, indent=2)
@@ -6758,7 +7268,11 @@ def api_pipeline_start_auto():
             "require_pro": True
         }), 403
 
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    ws_id = get_workspace_id(request)
+    ws_dir = get_workspace_dir(request)
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
     if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
         return jsonify({"error": "Vui lòng tải video lên trước khi chạy tiến trình 24/7!"}), 400
 
@@ -6773,7 +7287,7 @@ def api_pipeline_start_auto():
     job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     Thread(
         target=run_server_auto_pipeline_thread,
-        args=(job_id, settings, api_keys, engine, initial_segments, dev_id, target_hw),
+        args=(job_id, settings, api_keys, engine, initial_segments, dev_id, target_hw, ws_id),
         daemon=True
     ).start()
 
@@ -6808,6 +7322,8 @@ def api_pipeline_job_status(job_id):
 def api_pipeline_active_job():
     dev_id = request.args.get("device_id", "")
     saved_job_id = request.args.get("job_id", "")
+    ws_id = get_workspace_id(request)
+    ws_dir = get_workspace_dir(request)
 
     # 1. Kiểm tra theo job_id cụ thể nếu client có gửi
     if saved_job_id:
@@ -6824,13 +7340,11 @@ def api_pipeline_active_job():
         if job:
             return jsonify({"active": True, "job": job})
 
-    # 2. Tìm job mới nhất của thiết bị
-    latest_job = None
-    # 2. Tìm job mới nhất của thiết bị trong bộ nhớ hoặc trên ổ đĩa
+    # 2. Tìm job mới nhất của thiết bị hoặc workspace
     candidate_jobs = []
     with SERVER_JOBS_LOCK:
         for jid, j in ACTIVE_SERVER_JOBS.items():
-            if not dev_id or j.get("device_id") == dev_id:
+            if not dev_id or j.get("device_id") == dev_id or j.get("workspace_id") == ws_id:
                 candidate_jobs.append(j)
 
     if os.path.exists(SERVER_JOBS_DIR):
@@ -6841,7 +7355,7 @@ def api_pipeline_active_job():
                     try:
                         with open(s_file, "r", encoding="utf-8") as f:
                             cand = json.load(f)
-                            if not dev_id or cand.get("device_id") == dev_id:
+                            if not dev_id or cand.get("device_id") == dev_id or cand.get("workspace_id") == ws_id:
                                 if not any(c.get("job_id") == cand.get("job_id") for c in candidate_jobs):
                                     candidate_jobs.append(cand)
                     except Exception:
@@ -6851,16 +7365,19 @@ def api_pipeline_active_job():
         candidate_jobs.sort(key=lambda x: str(x.get("updated_at", x.get("created_at", ""))), reverse=True)
         return jsonify({"active": True, "job": candidate_jobs[0]})
 
-    # 4. Nếu không có job, kiểm tra xem có video đã tải lên trong phiên làm việc hiện tại không
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    # 4. Nếu không có job, kiểm tra xem có video đã tải lên trong workspace không
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path):
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
     if os.path.exists(video_path):
         return jsonify({
             "active": False,
             "has_input_video": True,
-            "source_url": "/temp_session/input_video.mp4"
+            "source_url": "/temp_session/input_video.mp4",
+            "workspace": ws_id
         })
 
-    return jsonify({"active": False})
+    return jsonify({"active": False, "workspace": ws_id})
 
 @app.route("/api/pipeline/job_video/<job_id>/<filename>")
 def api_pipeline_job_video(job_id, filename):
