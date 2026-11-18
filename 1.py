@@ -522,8 +522,8 @@ ACTIVE_CLOUD_JOB = {
 
 def get_workspace_id(req=None):
     """
-    Xác định Workspace ID riêng biệt cho từng người dùng:
-    1. Key bản quyền từ Token (X-Nexus-Session hoặc Cookie nexus_session_token)
+    Xác định Workspace ID riêng biệt 100% cho từng người dùng & thiết bị:
+    1. Key bản quyền + Device ID từ Token (Mỗi thiết bị dùng chung 1 Key vẫn có workspace riêng!)
     2. Hoặc Device Fingerprint (X-Nexus-Device hoặc Cookie nexus_device_fingerprint)
     3. Hoặc Query Param ?ws=...
     """
@@ -534,20 +534,25 @@ def get_workspace_id(req=None):
         except Exception:
             return "default"
     try:
+        # Lấy dev_id từ header, cookie hoặc param
+        dev_id = req.headers.get("X-Nexus-Device") or req.cookies.get("nexus_device_fingerprint", "") or req.args.get("device_id", "")
         token = req.headers.get("X-Nexus-Session") or req.cookies.get("nexus_session_token", "")
+        
+        # 1. Nếu đã đăng nhập / kích hoạt Key
         if token and "|" in token:
             parts = token.split("|")
             key_raw = parts[0].strip()
-            safe_key = re.sub(r'[^a-zA-Z0-9_\-]', '_', key_raw)
-            if safe_key:
-                return safe_key[:32]
-        
-        dev_id = req.headers.get("X-Nexus-Device") or req.cookies.get("nexus_device_fingerprint", "")
+            token_dev = parts[1].strip() if len(parts) > 1 else ""
+            eff_dev = token_dev or dev_id or "primary"
+            safe_key = re.sub(r'[^a-zA-Z0-9_\-]', '_', key_raw)[:24]
+            dev_hash = hashlib.sha256(eff_dev.encode("utf-8")).hexdigest()[:8]
+            return f"{safe_key}_{dev_hash}"
+
+        # 2. Nếu là khách dùng thử chưa có token (theo thiết bị)
         if dev_id:
-            safe_dev = re.sub(r'[^a-zA-Z0-9_\-]', '_', dev_id)
-            if safe_dev:
-                return f"dev_{safe_dev[:16]}"
-                
+            dev_hash = hashlib.sha256(dev_id.encode("utf-8")).hexdigest()[:10]
+            return f"dev_{dev_hash}"
+
         ws_param = req.args.get("ws") or (req.json.get("ws") if req.is_json and req.json else None)
         if ws_param:
             safe_p = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(ws_param))
@@ -611,41 +616,85 @@ reset_temp_session()
 # Kích hoạt toàn bộ tính năng trong nexus_addons.py (SmartBlur, DVD Watermark, Logo, CORS, Railway)
 register_nexus_addons(app, TEMP_DIR, update_progress, TUNNEL_INFO)
 
-def load_cloud_config():
+def get_workspace_cloud_config_path(ws_id=None):
+    if not ws_id:
+        try:
+            ws_id = get_workspace_id()
+        except Exception:
+            ws_id = "default"
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+    os.makedirs(ws_dir, exist_ok=True)
+    return os.path.join(ws_dir, "cloud_config.json")
+
+def load_cloud_config(ws_id=None):
+    """
+    Nạp cấu hình Kaggle, GitHub và Gemini API của RIÊNG người dùng / workspace hiện tại.
+    """
+    cfg_path = get_workspace_cloud_config_path(ws_id)
     default_cfg = {
-        "kaggle_username": os.environ.get("KAGGLE_USERNAME", ""),
-        "kaggle_key": os.environ.get("KAGGLE_KEY", ""),
-        "kaggle_kernel_slug": os.environ.get("KAGGLE_KERNEL_SLUG", "nexus-vietsub-worker"),
-        "github_token": os.environ.get("GITHUB_TOKEN", ""),
-        "github_repo": os.environ.get("GITHUB_REPO", "hieubinh8281-sys/nexus-worker2"),
-        "github_codespace_name": os.environ.get("GITHUB_CODESPACE_NAME", "")
+        "kaggle_username": "",
+        "kaggle_key": "",
+        "kaggle_kernel_slug": "nexus-vietsub-worker",
+        "github_token": "",
+        "github_repo": "Tridung-boop/nexus-worker2",
+        "github_codespace_name": "",
+        "gemini_keys": "",
+        "gemini_model": "gemini-3.5-flash"
     }
-    if os.path.exists(CLOUD_CONFIG_FILE):
+    # 1. Đọc file cấu hình riêng của workspace
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                for k, v in saved.items():
+                    if v is not None:
+                        default_cfg[k] = v
+        except Exception:
+            pass
+    # 2. Nếu workspace mới chưa cấu hình, fallback sang file global làm mẫu ban đầu
+    elif os.path.exists(CLOUD_CONFIG_FILE):
         try:
             with open(CLOUD_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
                 for k, v in saved.items():
-                    if v:
+                    if v is not None and not default_cfg.get(k):
                         default_cfg[k] = v
         except Exception:
             pass
-    # Railway Variables take top priority so user can store secret tokens safely without pushing to public Git
+
+    # 3. Biến môi trường hệ thống (Railway) nếu người dùng có khai báo
     for env_k, cfg_k in [
         ("GITHUB_TOKEN", "github_token"),
         ("GITHUB_REPO", "github_repo"),
         ("KAGGLE_USERNAME", "kaggle_username"),
         ("KAGGLE_KEY", "kaggle_key"),
         ("KAGGLE_KERNEL_SLUG", "kaggle_kernel_slug"),
-        ("GITHUB_CODESPACE_NAME", "github_codespace_name")
+        ("GITHUB_CODESPACE_NAME", "github_codespace_name"),
+        ("GEMINI_API_KEY", "gemini_keys")
     ]:
         val = os.environ.get(env_k)
-        if val and val.strip():
+        if val and val.strip() and not default_cfg.get(cfg_k):
             default_cfg[cfg_k] = val.strip()
     return default_cfg
 
-def save_cloud_config(cfg):
-    current = load_cloud_config()
-    current.update(cfg)
+def save_cloud_config(cfg, ws_id=None):
+    """
+    Lưu cấu hình Kaggle, GitHub, Gemini API vào workspace của RIÊNG người dùng này.
+    """
+    cfg_path = get_workspace_cloud_config_path(ws_id)
+    cur = load_cloud_config(ws_id)
+    for k in ["kaggle_username", "kaggle_key", "kaggle_kernel_slug", "github_token", "github_repo", "github_codespace_name", "gemini_keys", "gemini_model"]:
+        if k in cfg:
+            cur[k] = str(cfg[k]).strip()
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cur, f, ensure_ascii=False, indent=2)
+        if not ws_id or ws_id == "default":
+            with open(CLOUD_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(cur, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[!] Lỗi lưu cloud config workspace {ws_id}: {e}", flush=True)
+    return cur
     with open(CLOUD_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(current, f, ensure_ascii=False, indent=2)
     return current
@@ -1342,7 +1391,7 @@ def run_worker():
         if bw >= 8 and bh >= 8:
             b_steps = [f"crop={bw}:{bh}:{bx}:{by}"]
             # Kính mờ tự nhiên chuẩn Studio cao cấp (không viền đen, không ám màu)
-            if b_sig > 0: b_steps.append(f"boxblur=luma_radius={b_sig}:luma_power=2")
+            if b_sig > 0: b_steps.append(f"boxblur=luma_radius={b_sig}:luma_power=1")
             if b_op > 0.02: b_steps.append(f"drawbox=x=0:y=0:w={bw}:h={bh}:color=0x{b_col}@{b_op:.2f}:t=fill")
             base_vf = f"[0:v]split=2[main][cs];[cs]{','.join(b_steps)}[bl];[main][bl]overlay={bx}:{by}:shortest=1,ass=sub_vi.ass[v_sub]"
         else:
@@ -1545,11 +1594,29 @@ def build_worker_script_for_job(job_id, cfg, relay_url=None):
     script = script.replace("__GH_CODESPACE__", cfg.get("github_codespace_name", ""))
     return script
 
-def dispatch_kaggle_t4_worker(job_id):
-    cfg = load_cloud_config()
+def dispatch_kaggle_t4_worker(job_id, ws_id=None):
+    if not ws_id:
+        with SERVER_JOBS_LOCK:
+            if job_id in ACTIVE_SERVER_JOBS:
+                ws_id = ACTIVE_SERVER_JOBS[job_id].get("workspace_id")
+    if not ws_id:
+        ws_id = ACTIVE_CLOUD_JOB.get("workspace_id")
+    if not ws_id:
+        try:
+            from flask import request as flask_req
+            ws_id = get_workspace_id(flask_req)
+        except Exception:
+            pass
+
+    cfg = load_cloud_config(ws_id=ws_id)
     username = cfg.get("kaggle_username", "").strip()
     key = cfg.get("kaggle_key", "").strip()
     slug = cfg.get("kaggle_kernel_slug", "nexus-vietsub-worker").strip() or "nexus-vietsub-worker"
+
+    # Fallback kiểm tra biến môi trường hoặc cấu hình global nếu workspace chưa lưu
+    if not username or not key:
+        username = os.environ.get("KAGGLE_USERNAME", "").strip()
+        key = os.environ.get("KAGGLE_KEY", "").strip()
 
     if not username or not key:
         raise RuntimeError("Chưa cấu hình Kaggle Username & API Key! Hãy bấm nút '☁️ Cấu Hình Cloud' trên thanh công cụ để nhập thông tin.")
@@ -1564,11 +1631,14 @@ def dispatch_kaggle_t4_worker(job_id):
     kaggle_env["KAGGLE_KEY"] = key
     kaggle_env.pop("KAGGLE_API_TOKEN", None)
 
-    # 2. Ghi file kaggle.json và XÓA file access_token nếu có
-    # (Vì access_token là chuẩn OAuth mới của Kaggle v2, nếu ghi nhầm API key vào đó sẽ làm hỏng xác thực Option A/B)
+    # 2. Ghi file kaggle.json vào mọi thư mục cấu hình tiềm năng
+    import tempfile
     target_dirs = [os.path.expanduser("~/.kaggle")]
     if os.name != "nt":
-        target_dirs.extend(["/root/.kaggle", "/tmp/.kaggle"])
+        target_dirs.extend(["/root/.kaggle", "/tmp/.kaggle", "/app/.kaggle"])
+    tmp_k = os.path.join(tempfile.gettempdir(), ".kaggle")
+    if tmp_k not in target_dirs:
+        target_dirs.append(tmp_k)
 
     for k_dir in target_dirs:
         try:
@@ -1577,8 +1647,9 @@ def dispatch_kaggle_t4_worker(job_id):
             with open(k_json, "w", encoding="utf-8") as f:
                 json.dump({"username": username, "key": key}, f)
             if os.name != "nt":
-                os.chmod(k_json, 0o600)
-            # Xóa sạch access_token cũ để Kaggle ưu tiên dùng kaggle.json chuẩn
+                try: os.chmod(k_json, 0o600)
+                except Exception: pass
+            # Xóa sạch access_token cũ để Kaggle ưu tiên dùng API key chuẩn
             k_tok = os.path.join(k_dir, "access_token")
             if os.path.exists(k_tok):
                 try: os.remove(k_tok)
@@ -1614,22 +1685,27 @@ def dispatch_kaggle_t4_worker(job_id):
 
     update_progress(5, f"Đang khởi tạo phiên GPU T4 trên Kaggle ({username}/{slug})...")
 
-    # 3. Kích hoạt phiên bằng Kaggle Python API trực tiếp (không bị lỗi CLI Option A/B)
+    # 3. Kích hoạt phiên bằng Kaggle Python API trực tiếp (nạp config_values trực tiếp, không gọi authenticate() tránh bị exit(1))
     push_done = False
     last_err = ""
     try:
         from kaggle.api.kaggle_api_extended import KaggleApi
         api = KaggleApi()
-        api.authenticate()
+        api.config_values[api.CONFIG_NAME_USER] = username
+        api.config_values[api.CONFIG_NAME_KEY] = key
+        api._authenticated = True
         res = api.kernels_push(KAGGLE_PUSH_DIR)
         if res and getattr(res, "error", None):
             raise RuntimeError(str(res.error))
         push_done = True
-    except Exception as e_api:
+    except (Exception, SystemExit) as e_api:
         last_err = str(e_api)
-        print(f"[!] Kaggle API Direct Push failed ({e_api}), fallback to subprocess...", flush=True)
+        print(f"[!] Kaggle API Direct Push notice ({e_api}), fallback to subprocess...", flush=True)
 
     if not push_done:
+        kaggle_env["KAGGLE_USERNAME"] = username
+        kaggle_env["KAGGLE_KEY"] = key
+        kaggle_env["KAGGLE_CONFIG_DIR"] = target_dirs[0]
         proc = subprocess.run(
             [sys.executable, "-m", "kaggle", "kernels", "push", "-p", KAGGLE_PUSH_DIR],
             capture_output=True, text=True, encoding="utf-8", errors="ignore",
@@ -1649,8 +1725,20 @@ def dispatch_kaggle_t4_worker(job_id):
 
     update_progress(8, "Đã bật phiên Kaggle GPU T4! Đang chờ Kaggle tải Video từ Trạm Trung Chuyển...")
 
-def dispatch_github_vps_worker(job_id, relay_url=None):
-    cfg = load_cloud_config()
+def dispatch_github_vps_worker(job_id, relay_url=None, ws_id=None):
+    if not ws_id:
+        with SERVER_JOBS_LOCK:
+            if job_id in ACTIVE_SERVER_JOBS:
+                ws_id = ACTIVE_SERVER_JOBS[job_id].get("workspace_id")
+    if not ws_id:
+        ws_id = ACTIVE_CLOUD_JOB.get("workspace_id")
+    if not ws_id:
+        try:
+            from flask import request as flask_req
+            ws_id = get_workspace_id(flask_req)
+        except Exception:
+            pass
+    cfg = load_cloud_config(ws_id=ws_id)
     token = cfg.get("github_token", "").strip().strip("'\"")
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
@@ -2111,7 +2199,7 @@ HTML_TEMPLATE = """
         }
         body.is-mobile .sub-table-container {
             max-height: none !important;
-            min-height: 550px !important;
+            min-height: 250px !important;
             overflow-y: visible !important;
         }
 
@@ -2362,7 +2450,7 @@ HTML_TEMPLATE = """
     <!-- MAIN WORKSPACE -->
     <main class="flex-1 grid grid-cols-12 gap-3 p-3 overflow-hidden">
         <!-- MOBILE VIEW SELECTOR (Chỉ hiện trên điện thoại: Công Cụ / Video / Phụ Đề) -->
-        <div id="mobileViewNav" class="col-span-12 flex items-center bg-[#070b18]/95 backdrop-blur-xl p-1.5 rounded-2xl border border-sky-500/30 gap-1.5 text-xs font-bold shadow-lg">
+        <div id="mobileViewNav" class="col-span-12 flex items-center bg-[#070b18]/95 backdrop-blur-xl p-1.5 rounded-2xl border border-sky-500/30 gap-1.5 text-xs font-bold shadow-lg sticky top-0 z-30">
             <button onclick="setMobileActiveView('tools')" id="mobNav_tools" class="flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-md shadow-sky-500/25">
                 <i class="fa-solid fa-sliders"></i> <span>1. Công Cụ</span>
             </button>
@@ -3221,6 +3309,9 @@ HTML_TEMPLATE = """
             <span id="mobileBottomStatus" class="text-[11px] text-slate-300 truncate">Sẵn sàng</span>
         </div>
         <div class="flex items-center gap-1.5 shrink-0">
+            <button id="mobileViewVideoBtn" onclick="setMobileActiveView('monitors'); setTimeout(() => { const v = document.getElementById('outputVideo'); if (v) { v.scrollIntoView({behavior:'smooth'}); try { v.play(); } catch(e){} } }, 150);" class="hidden px-3 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 active:scale-95 text-white text-xs font-black shadow-lg shadow-emerald-500/25 flex items-center gap-1">
+                <i class="fa-solid fa-play"></i> Xem Video
+            </button>
             <button onclick="runAllSteps()" class="px-3.5 py-2 rounded-xl bg-gradient-to-r from-sky-500 via-indigo-600 to-purple-600 active:scale-95 text-white text-xs font-black shadow-lg shadow-sky-500/25 flex items-center gap-1.5">
                 <i class="fa-solid fa-bolt"></i> A → Z
             </button>
@@ -3399,7 +3490,11 @@ HTML_TEMPLATE = """
 
         async function loadCloudConfigToUI() {
             try {
-                const res = await fetch('/api/cloud/config');
+                const devId = (typeof getDeviceFingerprint === 'function') ? getDeviceFingerprint() : (localStorage.getItem('nexus_device_id') || '');
+                const token = (typeof getLicenseToken === 'function') ? getLicenseToken() : (localStorage.getItem('nexus_license_token') || '');
+                const res = await fetch('/api/cloud/config', {
+                    headers: { 'X-Nexus-Device': devId, 'X-Nexus-Session': token }
+                });
                 const cfg = await res.json();
                 document.getElementById('cfg_kaggle_user').value = cfg.kaggle_username || '';
                 document.getElementById('cfg_kaggle_key').value = cfg.kaggle_key || '';
@@ -3407,6 +3502,20 @@ HTML_TEMPLATE = """
                 document.getElementById('cfg_gh_token').value = cfg.github_token || '';
                 document.getElementById('cfg_gh_repo').value = cfg.github_repo || '';
                 document.getElementById('cfg_gh_codespace').value = cfg.github_codespace_name || '';
+
+                // Đồng bộ Gemini Key từ server nếu máy chưa có
+                if (cfg.gemini_keys) {
+                    const localKeys = localStorage.getItem('gemini_api_keys_list') || '';
+                    if (!localKeys) {
+                        localStorage.setItem('gemini_api_keys_list', cfg.gemini_keys);
+                        const mKeys = document.getElementById('geminiKeys');
+                        if (mKeys) mKeys.value = cfg.gemini_keys;
+                        const sKeys = document.getElementById('settingsGeminiKeys');
+                        if (sKeys) sKeys.value = cfg.gemini_keys;
+                        updateKeyCount();
+                        updateSettingsKeyCount();
+                    }
+                }
             } catch (e) {}
         }
 
@@ -3440,21 +3549,28 @@ HTML_TEMPLATE = """
         }
 
         async function saveCloudConfigUI() {
+            const devId = (typeof getDeviceFingerprint === 'function') ? getDeviceFingerprint() : (localStorage.getItem('nexus_device_id') || '');
+            const token = (typeof getLicenseToken === 'function') ? getLicenseToken() : (localStorage.getItem('nexus_license_token') || '');
             const payload = {
                 kaggle_username: document.getElementById('cfg_kaggle_user').value.trim(),
                 kaggle_key: document.getElementById('cfg_kaggle_key').value.trim(),
                 kaggle_kernel_slug: document.getElementById('cfg_kaggle_slug').value.trim() || 'nexus-vietsub-worker',
                 github_token: document.getElementById('cfg_gh_token').value.trim(),
                 github_repo: document.getElementById('cfg_gh_repo').value.trim(),
-                github_codespace_name: document.getElementById('cfg_gh_codespace').value.trim()
+                github_codespace_name: document.getElementById('cfg_gh_codespace').value.trim(),
+                gemini_keys: (localStorage.getItem('gemini_api_keys_list') || '').trim()
             };
             await fetch('/api/cloud/config', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Nexus-Device': devId,
+                    'X-Nexus-Session': token
+                },
                 body: JSON.stringify(payload)
             });
             closeCloudModal();
-            setStatus(100, "Đã lưu cấu hình Cloud Worker (Kaggle T4 & GitHub VPS 6h)!");
+            setStatus(100, "Đã lưu cấu hình Cloud Worker riêng của bạn!");
         }
 
         async function testGithubConnection() {
@@ -3548,10 +3664,16 @@ HTML_TEMPLATE = """
             document.getElementById('btnStopCloud').classList.remove('hidden');
             startPolling();
 
+            const devId = (typeof getDeviceFingerprint === 'function') ? getDeviceFingerprint() : (localStorage.getItem('nexus_device_id') || '');
+            const token = (typeof getLicenseToken === 'function') ? getLicenseToken() : (localStorage.getItem('nexus_license_token') || '');
             try {
                 const startRes = await fetch('/api/cloud/dispatch', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Nexus-Device': devId,
+                        'X-Nexus-Session': token
+                    },
                     body: JSON.stringify({
                         provider: prov,
                         task_mode: taskMode,
@@ -4791,6 +4913,15 @@ HTML_TEMPLATE = """
                 updateKeyCount();
             }
             updateSettingsKeyCount();
+            try {
+                const sModel = document.getElementById('settingsGeminiModel');
+                const mVal = sModel ? sModel.value : 'gemini-3.5-flash';
+                fetch('/api/cloud/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ gemini_keys: val, gemini_model: mVal })
+                }).catch(() => {});
+            } catch(e) {}
         }
 
         async function testGeminiKeysFromSettings() {
@@ -5053,6 +5184,14 @@ HTML_TEMPLATE = """
                             rBadge.className = "text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold";
                         }
 
+                        const mobBtn = document.getElementById('mobileViewVideoBtn');
+                        if (mobBtn) mobBtn.classList.remove('hidden');
+                        if (isMobileDevice) {
+                            setMobileActiveView('monitors');
+                            const outV = document.getElementById('outputVideo');
+                            if (outV) outV.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }
+
                         showToast("🎉 Chúc mừng! Tiến trình 24/7 đã hoàn tất xuất sắc toàn bộ các bước! Video đã sẵn sàng tải về.", 7000);
                     } else if (data.status === 'error') {
                         clearInterval(serverJobTimer);
@@ -5150,6 +5289,14 @@ HTML_TEMPLATE = """
                         if (rBadge) {
                             rBadge.innerText = "24/7 Hoàn Thành 100%";
                             rBadge.className = "text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold";
+                        }
+
+                        const mobBtn = document.getElementById('mobileViewVideoBtn');
+                        if (mobBtn) mobBtn.classList.remove('hidden');
+                        if (isMobileDevice) {
+                            setMobileActiveView('monitors');
+                            const outV = document.getElementById('outputVideo');
+                            if (outV) outV.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         }
 
                         showToast("🎉 Tiến trình 24/7 đã hoàn tất trong lúc bạn rời trang web/tắt máy! Video đã sẵn sàng xem & tải về.", 8000);
@@ -5523,18 +5670,20 @@ def serve_temp(filename):
 
 @app.route("/workspace/<ws_id>/<path:filename>")
 def serve_workspace_file(ws_id, filename):
-    safe_ws = re.sub(r'[^a-zA-Z0-9_\-]', '_', ws_id)[:32]
+    safe_ws = re.sub(r'[^a-zA-Z0-9_\-]', '_', ws_id)[:48]
     target_dir = os.path.join(WORKSPACES_ROOT, f"ws_{safe_ws}")
-    if os.path.exists(os.path.join(target_dir, filename)):
-        return send_from_directory(target_dir, filename, conditional=True)
-    return send_from_directory(TEMP_DIR, filename, conditional=True)
+    safe_fn = os.path.basename(filename)
+    if os.path.exists(os.path.join(target_dir, safe_fn)):
+        return send_from_directory(target_dir, safe_fn, conditional=True)
+    return jsonify({"error": "Không tìm thấy tệp trong workspace này"}), 404
 
 @app.route("/api/cloud/config", methods=["GET", "POST"])
 def api_cloud_config():
+    ws_id = get_workspace_id(request)
     if request.method == "POST":
-        saved = save_cloud_config(request.json or {})
+        saved = save_cloud_config(request.json or {}, ws_id=ws_id)
         return jsonify(saved)
-    return jsonify(load_cloud_config())
+    return jsonify(load_cloud_config(ws_id=ws_id))
 
 @app.route("/api/cloud/test_github", methods=["POST"])
 def api_cloud_test_github():
@@ -5628,8 +5777,12 @@ def api_cloud_dispatch():
     if quota_limit != -1 and quota_used >= quota_limit:
         return jsonify({"error": f"❌ Key của bạn đã hết hạn mức sử dụng ({quota_used}/{quota_limit} lượt)! Vui lòng liên hệ Admin để nạp thêm lượt.", "quota_exceeded": True}), 403
 
-    video_path = os.path.join(TEMP_DIR, "input_video.mp4")
-    if not os.path.exists(video_path):
+    ws_id = get_workspace_id(request)
+    ws_dir = get_workspace_dir(request)
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
+    if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
         return jsonify({"error": "Vui lòng chọn tải Video lên trước khi chạy!"}), 400
 
     consume_license_quota(key_str, 1, device_id=dev_id)
@@ -5638,6 +5791,12 @@ def api_cloud_dispatch():
     provider = data.get("provider", "kaggle")
     task_mode = data.get("task_mode", "full")
     job_id = datetime.now().strftime("job_%H%M%S_") + uuid.uuid4().hex[:6]
+    job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    try:
+        shutil.copy2(video_path, os.path.join(job_dir, "input_video.mp4"))
+    except Exception:
+        pass
 
     # Nếu người dùng chưa vẽ khung che mờ tay, tự động chạy SmartBlur (quét 3-5p đầu che cả hàng) trước khi gửi lên Cloud!
     st = data.get("settings", {})
@@ -5662,6 +5821,8 @@ def api_cloud_dispatch():
 
     ACTIVE_CLOUD_JOB.update({
         "job_id": job_id,
+        "workspace_id": ws_id,
+        "device_id": dev_id,
         "provider": provider,
         "status": "running",
         "task_mode": task_mode,
@@ -5671,15 +5832,29 @@ def api_cloud_dispatch():
         "output_ready": False
     })
 
+    with SERVER_JOBS_LOCK:
+        ACTIVE_SERVER_JOBS[job_id] = {
+            "job_id": job_id,
+            "device_id": dev_id,
+            "workspace_id": ws_id,
+            "status": "running",
+            "percent": 5,
+            "message": f"Đang khởi tạo tiến trình {provider.upper()}...",
+            "source_url": f"/api/pipeline/job_video/{job_id}/input_video.mp4",
+            "created_at": datetime.now().isoformat()
+        }
+
     job_cfg_path = os.path.join(TEMP_DIR, f"{job_id}_config.json")
     with open(job_cfg_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    with open(os.path.join(job_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
     try:
         if provider == "kaggle":
-            dispatch_kaggle_t4_worker(job_id)
+            dispatch_kaggle_t4_worker(job_id, ws_id=ws_id)
         elif provider in ("github", "server_247"):
-            dispatch_github_vps_worker(job_id)
+            dispatch_github_vps_worker(job_id, ws_id=ws_id)
         else:
             return jsonify({"error": "Provider không hợp lệ"}), 400
 
@@ -6135,16 +6310,13 @@ def upload_video():
     file = request.files.get("video")
     if not file:
         return jsonify({"error": "Không tìm thấy file video"}), 400
+    ws_id = get_workspace_id(request)
     ws_dir = get_workspace_dir(request)
     video_path = os.path.join(ws_dir, "input_video.mp4")
     file.save(video_path)
-    try:
-        shutil.copy2(video_path, os.path.join(TEMP_DIR, "input_video.mp4"))
-    except Exception:
-        pass
     LAST_AUDIO_SIGNATURE["sig"] = None
     audio_ok = has_audio_stream(video_path)
-    return jsonify({"status": "ok", "video_url": "/temp_session/input_video.mp4", "has_audio": audio_ok, "workspace": get_workspace_id(request)})
+    return jsonify({"status": "ok", "video_url": f"/workspace/{ws_id}/input_video.mp4?t={int(time.time())}", "has_audio": audio_ok, "workspace": ws_id})
 
 @app.route("/merge_audio", methods=["POST"])
 def merge_audio():
@@ -7237,9 +7409,9 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
         update_job(6, f"Đang gửi lệnh kích hoạt tiến trình 24/7 sang {provider_label}...", step="dispatch")
 
         if provider == "kaggle":
-            dispatch_kaggle_t4_worker(job_id)
+            dispatch_kaggle_t4_worker(job_id, ws_id=ws_id)
         else:
-            dispatch_github_vps_worker(job_id)
+            dispatch_github_vps_worker(job_id, ws_id=ws_id)
 
         update_job(10, f"Đã kết nối thành công với {provider_label}! Đang chờ Worker nhận Video từ Trạm Trung Chuyển...", step="running")
 
@@ -7345,7 +7517,7 @@ def api_pipeline_active_job():
     ws_id = get_workspace_id(request)
     ws_dir = get_workspace_dir(request)
 
-    # 1. Kiểm tra theo job_id cụ thể nếu client có gửi
+    # 1. Kiểm tra theo job_id cụ thể nếu client có gửi (và phải thuộc về đúng workspace/thiết bị này)
     if saved_job_id:
         with SERVER_JOBS_LOCK:
             job = ACTIVE_SERVER_JOBS.get(saved_job_id)
@@ -7357,14 +7529,14 @@ def api_pipeline_active_job():
                         job = json.load(f)
                 except Exception:
                     pass
-        if job:
+        if job and (job.get("workspace_id") == ws_id or (dev_id and job.get("device_id") == dev_id)):
             return jsonify({"active": True, "job": job})
 
-    # 2. Tìm job mới nhất của thiết bị hoặc workspace
+    # 2. Tìm job mới nhất của CHÍNH THIẾT BỊ HOẶC WORKSPACE NÀY (Không lấy của máy khác!)
     candidate_jobs = []
     with SERVER_JOBS_LOCK:
         for jid, j in ACTIVE_SERVER_JOBS.items():
-            if not dev_id or j.get("device_id") == dev_id or j.get("workspace_id") == ws_id:
+            if (dev_id and j.get("device_id") == dev_id) or (ws_id and ws_id != "default" and j.get("workspace_id") == ws_id):
                 candidate_jobs.append(j)
 
     if os.path.exists(SERVER_JOBS_DIR):
@@ -7375,7 +7547,7 @@ def api_pipeline_active_job():
                     try:
                         with open(s_file, "r", encoding="utf-8") as f:
                             cand = json.load(f)
-                            if not dev_id or cand.get("device_id") == dev_id or cand.get("workspace_id") == ws_id:
+                            if (dev_id and cand.get("device_id") == dev_id) or (ws_id and ws_id != "default" and cand.get("workspace_id") == ws_id):
                                 if not any(c.get("job_id") == cand.get("job_id") for c in candidate_jobs):
                                     candidate_jobs.append(cand)
                     except Exception:
@@ -7385,15 +7557,13 @@ def api_pipeline_active_job():
         candidate_jobs.sort(key=lambda x: str(x.get("updated_at", x.get("created_at", ""))), reverse=True)
         return jsonify({"active": True, "job": candidate_jobs[0]})
 
-    # 4. Nếu không có job, kiểm tra xem có video đã tải lên trong workspace không
+    # 3. Nếu không có job, kiểm tra video trong workspace của RIÊNG NGƯỜI NÀY
     video_path = os.path.join(ws_dir, "input_video.mp4")
-    if not os.path.exists(video_path):
-        video_path = os.path.join(TEMP_DIR, "input_video.mp4")
-    if os.path.exists(video_path):
+    if os.path.exists(video_path) and os.path.getsize(video_path) > 100:
         return jsonify({
             "active": False,
             "has_input_video": True,
-            "source_url": "/temp_session/input_video.mp4",
+            "source_url": f"/workspace/{ws_id}/input_video.mp4",
             "workspace": ws_id
         })
 
@@ -7537,6 +7707,146 @@ def api_admin_generate_railway():
         return jsonify({"status": "ok", "message": f"Đã tạo thành công bộ file deploy Railway ({', '.join(files)})!", "files": files})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/api/admin/workspaces", methods=["GET"])
+def api_admin_workspaces():
+    if not check_admin_token(request):
+        return jsonify({"error": "Chưa đăng nhập quyền Admin!"}), 401
+
+    db = load_license_db()
+    keys_db = db.get("keys", {})
+
+    workspaces = []
+    if os.path.exists(WORKSPACES_ROOT):
+        for entry in os.scandir(WORKSPACES_ROOT):
+            if entry.is_dir() and entry.name.startswith("ws_"):
+                ws_id = entry.name[3:]
+                ws_path = entry.path
+
+                # 1. Đọc cloud_config.json của workspace
+                cfg_file = os.path.join(ws_path, "cloud_config.json")
+                cfg = {}
+                if os.path.exists(cfg_file):
+                    try:
+                        with open(cfg_file, "r", encoding="utf-8") as f:
+                            cfg = json.load(f)
+                    except Exception:
+                        pass
+
+                # 2. Xác định License Key / Customer tương ứng
+                matched_key = None
+                matched_cust = "Khách Dùng Thử / Chưa gán tên"
+                matched_tier = "basic"
+                matched_quota_limit = 0
+                matched_quota_used = 0
+                matched_device = ""
+
+                for k_str, k_info in keys_db.items():
+                    safe_k = re.sub(r'[^a-zA-Z0-9_\-]', '_', k_str)
+                    if safe_k in ws_id:
+                        matched_key = k_str
+                        matched_cust = k_info.get("customer", "Khách hàng VIP")
+                        matched_tier = k_info.get("tier", "pro")
+                        matched_quota_limit = k_info.get("quota_limit", 50)
+                        matched_quota_used = k_info.get("quota_used", 0)
+                        matched_device = k_info.get("bound_device_id", "")
+                        break
+
+                # 3. Quét video của workspace
+                videos = []
+                for fname in ["input_video.mp4", "output_vietsub.mp4"]:
+                    fpath = os.path.join(ws_path, fname)
+                    if os.path.exists(fpath):
+                        size_mb = round(os.path.getsize(fpath) / (1024 * 1024), 2)
+                        mtime = datetime.fromtimestamp(os.path.getmtime(fpath)).strftime("%d/%m %H:%M")
+                        videos.append({
+                            "filename": fname,
+                            "label": "Video Gốc" if fname == "input_video.mp4" else "Video Thành Phẩm",
+                            "size_mb": size_mb,
+                            "modified": mtime,
+                            "url": f"/api/admin/video/{ws_id}/{fname}",
+                            "download_url": f"/api/admin/video/{ws_id}/{fname}?download=1"
+                        })
+
+                # 4. Quét active jobs
+                ws_jobs = []
+                with SERVER_JOBS_LOCK:
+                    for jid, j in ACTIVE_SERVER_JOBS.items():
+                        if j.get("workspace_id") == ws_id:
+                            ws_jobs.append({
+                                "job_id": jid,
+                                "status": j.get("status"),
+                                "percent": j.get("percent", 0),
+                                "message": j.get("message", "")
+                            })
+
+                workspaces.append({
+                    "ws_id": ws_id,
+                    "customer": matched_cust,
+                    "key": matched_key or "N/A",
+                    "tier": matched_tier,
+                    "quota_limit": matched_quota_limit,
+                    "quota_used": matched_quota_used,
+                    "device_id": matched_device,
+                    "gemini_keys": cfg.get("gemini_keys", ""),
+                    "gemini_model": cfg.get("gemini_model", "gemini-3.5-flash"),
+                    "kaggle_username": cfg.get("kaggle_username", ""),
+                    "github_repo": cfg.get("github_repo", ""),
+                    "videos": videos,
+                    "jobs": ws_jobs
+                })
+
+    return jsonify({"status": "ok", "workspaces": workspaces})
+
+@app.route("/api/admin/video/<ws_id>/<filename>")
+def api_admin_serve_video(ws_id, filename):
+    token = request.args.get("token") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        token = request.cookies.get("nexus_admin_token", "")
+    
+    is_valid_admin = False
+    if token and "|" in token:
+        parts = token.split("|")
+        if len(parts) == 3 and parts[0] == "admin":
+            role, exp_str, sig = parts
+            try:
+                if int(exp_str) >= int(time.time()):
+                    expected = hmac.new(SERVER_HMAC_SECRET.encode("utf-8"), f"admin|{exp_str}".encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+                    if sig == expected:
+                        is_valid_admin = True
+            except Exception:
+                pass
+
+    if not is_valid_admin:
+        return jsonify({"error": "Chưa đăng nhập quyền Admin!"}), 401
+
+    safe_ws = re.sub(r'[^a-zA-Z0-9_\-]', '_', ws_id)[:48]
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{safe_ws}")
+    safe_fn = os.path.basename(filename)
+    as_attachment = request.args.get("download") == "1"
+    return send_from_directory(ws_dir, safe_fn, as_attachment=as_attachment, conditional=True)
+
+@app.route("/api/admin/clean_workspace", methods=["POST"])
+def api_admin_clean_workspace():
+    if not check_admin_token(request):
+        return jsonify({"error": "Chưa đăng nhập quyền Admin!"}), 401
+    data = request.json or {}
+    ws_id = data.get("ws_id", "")
+    if not ws_id:
+        return jsonify({"error": "Thiếu ws_id"}), 400
+    safe_ws = re.sub(r'[^a-zA-Z0-9_\-]', '_', ws_id)[:48]
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{safe_ws}")
+    deleted = []
+    if os.path.exists(ws_dir):
+        for fname in ["input_video.mp4", "output_vietsub.mp4", "mixed_audio.wav", "voice_preview.mp3"]:
+            fp = os.path.join(ws_dir, fname)
+            if os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                    deleted.append(fname)
+                except Exception:
+                    pass
+    return jsonify({"status": "ok", "message": f"Đã giải phóng {len(deleted)} file video tạm của workspace {ws_id}!", "deleted": deleted})
 
 @app.route("/api/license/activate", methods=["POST"])
 def api_license_activate():
