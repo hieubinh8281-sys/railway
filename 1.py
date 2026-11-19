@@ -961,7 +961,8 @@ def install_dependencies():
     if shutil.which("apt-get"):
         sudo_prefix = ["sudo"] if (hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo")) else []
         subprocess.run(sudo_prefix + ["apt-get", "update", "-qq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(sudo_prefix + ["apt-get", "install", "-y", "-qq", "ffmpeg", "fonts-liberation", "fonts-noto-core", "fonts-noto-cjk"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(sudo_prefix + ["apt-get", "install", "-y", "-qq", "ffmpeg", "fonts-liberation", "fonts-noto-core", "fonts-noto-cjk", "fontconfig"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(sudo_prefix + ["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     pkgs = ["av", "faster-whisper", "edge-tts", "pydub", "Pillow", "requests", "numpy", "audioop-lts"]
     res = subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, capture_output=True, text=True)
@@ -1053,6 +1054,7 @@ def probe_video_info(video_path):
         return vid_w, vid_h, total_dur, has_audio
 
 def format_srt_time(seconds):
+    seconds = max(0.0, float(seconds or 0.0))
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -1060,6 +1062,7 @@ def format_srt_time(seconds):
     return f"{hrs:02d}:{mins:02d}:{secs:02d},{msecs:03d}"
 
 def format_ass_time(seconds):
+    seconds = max(0.0, float(seconds or 0.0))
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -1079,8 +1082,10 @@ def generate_ass(ass_path, segments, vid_w, vid_h, st, addon_cfg, total_dur):
     ass_font_size = int(round(int(st.get("fontSize", 22)) * 1.28))
     font_name = st.get("fontName", "Arial")
     target_lang = st.get("targetLang", "vi")
-    if target_lang in ("zh", "ja", "ko") and font_name in ("Arial", "Tahoma", "Verdana"):
+    if target_lang in ("zh", "ja", "ko"):
         font_name = "Noto Sans CJK SC"
+    elif font_name in ("Arial", "Tahoma", "Verdana", "Calibri"):
+        font_name = "Liberation Sans"
     outline_w = int(st.get("outlineWidth", 2))
     margin_v = int(st.get("marginV", 28))
 
@@ -1122,7 +1127,7 @@ Style: Default,{font_name},{ass_font_size},{ass_primary},&H000000FF,{ass_outline
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    with open(ass_path, "w", encoding="utf-8-sig") as f:
+    with open(ass_path, "w", encoding="utf-8") as f:
         f.write(header)
         for seg in segments:
             txt = (seg.get("trans") or seg.get("text") or "").strip().replace("\n", "\\N")
@@ -1366,6 +1371,7 @@ def run_worker():
     enable_tts = st.get("enableTts", True)
     tts_voice = st.get("ttsVoice", "piper:vi_VN-vais1000-medium")
     orig_vol = float(st.get("origVolume", 15)) / 100.0
+    video_input_name = "input_video.mp4"
 
     if enable_tts:
         if tts_voice.startswith("piper:"):
@@ -1599,13 +1605,25 @@ def run_worker():
 
         valid_areas = []
         for rect in raw_areas:
-            bx = max(0, int(rect.get("x", 0)) // 2 * 2)
-            by = max(0, int(rect.get("y", 0)) // 2 * 2)
-            bw = max(0, int(rect.get("w", 0)) // 2 * 2)
-            bh = max(0, int(rect.get("h", 0)) // 2 * 2)
+            try:
+                rx = int(rect.get("x", 0))
+                ry = int(rect.get("y", 0))
+                rw = int(rect.get("w", 0))
+                rh = int(rect.get("h", 0))
+            except Exception:
+                continue
+            if rw < 8 or rh < 8:
+                continue
+            bx = max(0, rx // 2 * 2)
+            by = max(0, ry // 2 * 2)
             if vid_w and vid_h:
-                bw = 0 if bx >= vid_w - 4 else min(bw, (vid_w - bx) // 2 * 2)
-                bh = 0 if by >= vid_h - 4 else min(bh, (vid_h - by) // 2 * 2)
+                if bx >= vid_w - 8 or by >= vid_h - 8:
+                    continue
+                bw = min(rw // 2 * 2, (vid_w - bx) // 2 * 2)
+                bh = min(rh // 2 * 2, (vid_h - by) // 2 * 2)
+            else:
+                bw = rw // 2 * 2
+                bh = rh // 2 * 2
             # Nếu dùng SmartSub nền chữ cho video ngắn, không blur vùng sub đáy nữa
             if use_opaque_box and by > (vid_h * 0.6) and bh < (vid_h * 0.35):
                 continue
@@ -1614,34 +1632,36 @@ def run_worker():
 
         b_op = float(st.get("blurOpacity", 0)) / 100.0
         b_sig = int(st.get("blurSigma", 22))
-        eff_sig = max(10, b_sig if b_sig > 0 else 22)
+        eff_sig = max(6, b_sig if b_sig > 0 else 22)
         b_col = st.get("blurColor", "#000000").lstrip('#')
 
+        def build_blur_box(a):
+            safe_r = max(2, min(eff_sig, min(a['w'], a['h']) // 3))
+            steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
+            steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_r}")
+            if b_op > 0.02:
+                steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{b_col}@{b_op:.2f}:t=fill")
+            return ",".join(steps)
+
         if len(valid_areas) == 0:
-            base_vf = "[0:v]ass=sub_vi.ass[v_sub]"
+            base_vf = "[0:v]ass='sub_vi.ass'[v_sub]"
         elif len(valid_areas) == 1:
             a = valid_areas[0]
-            b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
-            b_steps.append(f"avgblur=sizeX={eff_sig}:sizeY={eff_sig}:planes=7")
-            b_steps.append(f"boxblur=luma_radius={eff_sig}:luma_power=2:chroma_radius={eff_sig}")
-            if b_op > 0.02: b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{b_col}@{b_op:.2f}:t=fill")
-            base_vf = f"[0:v]split=2[main][cs];[cs]{','.join(b_steps)}[bl];[main][bl]overlay={a['x']}:{a['y']}:shortest=1,ass=sub_vi.ass[v_sub]"
+            b_chain = build_blur_box(a)
+            base_vf = f"[0:v]split=2[main][cs];[cs]{b_chain}[bl];[main][bl]overlay={a['x']}:{a['y']}:shortest=1,ass='sub_vi.ass'[v_sub]"
         else:
             n_areas = len(valid_areas)
             splits = "".join([f"[cs{i}]" for i in range(n_areas)])
             parts = [f"[0:v]split={n_areas+1}[main]{splits}"]
             for i, a in enumerate(valid_areas):
-                b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
-                b_steps.append(f"avgblur=sizeX={eff_sig}:sizeY={eff_sig}:planes=7")
-                b_steps.append(f"boxblur=luma_radius={eff_sig}:luma_power=2:chroma_radius={eff_sig}")
-                if b_op > 0.02: b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{b_col}@{b_op:.2f}:t=fill")
-                parts.append(f"[cs{i}]{','.join(b_steps)}[bl{i}]")
+                b_chain = build_blur_box(a)
+                parts.append(f"[cs{i}]{b_chain}[bl{i}]")
             cur_l = "[main]"
             for i, a in enumerate(valid_areas):
                 nxt_l = f"[tmp{i}]" if i < n_areas - 1 else "[v_bl]"
                 parts.append(f"{cur_l}[bl{i}]overlay={a['x']}:{a['y']}:shortest=1{nxt_l}")
                 cur_l = nxt_l
-            parts.append(f"[v_bl]ass=sub_vi.ass[v_sub]")
+            parts.append(f"[v_bl]ass='sub_vi.ass'[v_sub]")
             base_vf = ";".join(parts)
 
         has_valid_logo = bool(addon_cfg.get("logo_enabled") and os.path.exists(logo_path))
@@ -1667,9 +1687,9 @@ def run_worker():
             elif lmode == "bottom_right": pos_e = "x=W-w-24:y=H-h-24"
             elif lmode == "dvd_bounce": pos_e = "x='abs(mod(t*95,2*(W-w))-(W-w))':y='abs(mod(t*65,2*(H-h))-(H-h))'"
             else: pos_e = "x=W-w-24:y=24"
-            vf = f"{base_vf};[{logo_idx}:v]scale={lw}:-1,format=rgba,colorchannelmixer=aa={la:.2f}[logo_img];[v_sub][logo_img]overlay={pos_e}:shortest=1,format=yuv420p[outv]"
+            vf = f"{base_vf};[{logo_idx}:v]scale={lw}:-2,format=rgba,colorchannelmixer=aa={la:.2f}[logo_img];[v_sub][logo_img]overlay={pos_e}:shortest=1,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[outv]"
         else:
-            vf = base_vf.replace("[v_sub]", ",format=yuv420p[outv]")
+            vf = base_vf.replace("[v_sub]", ",scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[outv]")
 
         cmd += ["-filter_complex", vf, "-map", "[outv]"]
         if audio_input_idx is not None:
@@ -1684,9 +1704,13 @@ def run_worker():
         cmd += ["-movflags", "+faststart", "-c:a", "aac", "-b:a", "192k", "output_vietsub.mp4"]
 
         proc = subprocess.Popen(cmd, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="ignore")
+        ffmpeg_log_tail = []
         last_rep_t = 0.0
         last_rep_pct = -1
         for line in proc.stdout:
+            ffmpeg_log_tail.append(line)
+            if len(ffmpeg_log_tail) > 60:
+                ffmpeg_log_tail.pop(0)
             if line.startswith("out_time_us="):
                 try:
                     sec = int(line.strip().split("=")[1]) / 1_000_000.0
@@ -1700,10 +1724,45 @@ def run_worker():
                             report_progress(pct_now, f"Đang Render trên {enc_label} ({rp}%)...")
                 except Exception: pass
         proc.wait()
-        if proc.returncode != 0:
-            raise RuntimeError(f"FFmpeg render thất bại với mã lỗi {proc.returncode}!")
-        if not os.path.exists(out_video) or os.path.getsize(out_video) < 1000:
-            raise RuntimeError("File video thành phẩm không tồn tại hoặc có kích thước 0 byte!")
+
+        # NẾU CÓ LỖI: TỰ ĐỘNG KÍCH HOẠT FALLBACK SIÊU ỔN ĐỊNH VỚI SRT
+        if proc.returncode != 0 or not os.path.exists(out_video) or os.path.getsize(out_video) < 1000:
+            err_details = "".join(ffmpeg_log_tail[-25:]).strip()
+            print(f"[!] FFmpeg render ban đầu cảnh báo (code {proc.returncode}):\n{err_details}", flush=True)
+            report_progress(82, "FFmpeg bộ lọc nâng cao cảnh báo. Tự động kích hoạt Fallback Siêu Ổn Định...")
+
+            fb_cmd = ["ffmpeg", "-y", "-i", video_input_name]
+            fb_a_idx = None
+            if enable_tts and os.path.exists(final_audio):
+                fb_cmd += ["-i", "mixed_audio.wav"]
+                fb_a_idx = 1
+
+            fb_vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2,subtitles='sub_vi.srt',format=yuv420p"
+            fb_cmd += [
+                "-vf", fb_vf,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "0",
+                "-movflags", "+faststart", "-c:a", "aac", "-b:a", "192k"
+            ]
+            if fb_a_idx is not None:
+                fb_cmd += ["-map", "0:v:0", "-map", f"{fb_a_idx}:a:0"]
+            else:
+                fb_cmd += ["-map", "0:v:0", "-map", "0:a?"]
+
+            fb_cmd.append("output_vietsub.mp4")
+            fb_proc = subprocess.run(fb_cmd, cwd=work_dir, capture_output=True, text=True, errors="ignore")
+            if fb_proc.returncode != 0 or not os.path.exists(out_video) or os.path.getsize(out_video) < 1000:
+                last_fb_err = (fb_proc.stderr or "")[-300:].strip()
+                print(f"[!] Fallback 1 lỗi: {last_fb_err}. Thực hiện cấp cứu Stream Copy...", flush=True)
+                report_progress(84, "Đang đóng gói khẩn cấp Video thành phẩm...")
+                em_cmd = ["ffmpeg", "-y", "-i", video_input_name]
+                if enable_tts and os.path.exists(final_audio):
+                    em_cmd += ["-i", "mixed_audio.wav", "-map", "0:v:0", "-map", "1:a:0"]
+                else:
+                    em_cmd += ["-map", "0:v:0", "-map", "0:a?"]
+                em_cmd += ["-i", "sub_vi.srt", "-map", "2:s:0", "-c:v", "copy", "-c:a", "aac", "-c:s", "mov_text", "-movflags", "+faststart", "output_vietsub.mp4"]
+                em_proc = subprocess.run(em_cmd, cwd=work_dir, capture_output=True, text=True, errors="ignore")
+                if em_proc.returncode != 0 or not os.path.exists(out_video) or os.path.getsize(out_video) < 1000:
+                    raise RuntimeError(f"FFmpeg render thất bại với mã lỗi {proc.returncode}!\nChi tiết lỗi FFmpeg:\n{err_details[:400]}")
 
     # BƯỚC 5: LƯU TRỮ TRUNG GIAN TỐC ĐỘ CAO (GOFILE.IO & LITTERBOX TRỰC TIẾP) & GỬI VỀ TRẠM
     gofile_url = ""
@@ -2055,7 +2114,8 @@ jobs:
       - name: Install System, Fonts & AI Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-liberation fonts-noto-core fonts-noto-cjk
+          sudo apt-get install -y -qq ffmpeg fonts-liberation fonts-noto-core fonts-noto-cjk fontconfig
+          sudo fc-cache -f
           python -m pip install -q av faster-whisper edge-tts pydub Pillow requests numpy
       - name: Run Autonomous Pipeline & Auto-Shutdown
         run: |
