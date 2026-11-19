@@ -1088,20 +1088,9 @@ def generate_ass(ass_path, segments, vid_w, vid_h, st, addon_cfg, total_dur):
         font_name = "Liberation Sans"
     outline_w = int(st.get("outlineWidth", 2))
     margin_v = int(st.get("marginV", 28))
-
-    # Chế độ SmartSub: Video ngắn <= 15 phút (900s) tự động dùng Opaque Box (Nền chữ sang trọng bo sát sub gốc)
-    is_short = bool(total_dur and float(total_dur) <= 900.0)
-    smartsub_mode = st.get("smartsubMode", "auto")
-    use_opaque_box = (smartsub_mode == "opaque_box") or (smartsub_mode == "auto" and is_short)
-
-    if use_opaque_box:
-        border_style = 3
-        outline_val = max(3, outline_w)
-        back_colour = "&HD0000000"
-    else:
-        border_style = 1
-        outline_val = outline_w
-        back_colour = "&H80000000"
+    border_style = 1
+    outline_val = outline_w
+    back_colour = "&H80000000"
 
     dvd_style_line = ""
     if addon_cfg.get("dvd_text_enabled"):
@@ -1599,10 +1588,6 @@ def run_worker():
         if not raw_areas and st.get("blurRect"):
             raw_areas = [st.get("blurRect")]
 
-        is_short = bool(total_dur and float(total_dur) <= 900.0)
-        smartsub_mode = st.get("smartsubMode", "auto")
-        use_opaque_box = (smartsub_mode == "opaque_box") or (smartsub_mode == "auto" and is_short)
-
         valid_areas = []
         for rect in raw_areas:
             try:
@@ -1624,9 +1609,6 @@ def run_worker():
             else:
                 bw = rw // 2 * 2
                 bh = rh // 2 * 2
-            # Nếu dùng SmartSub nền chữ cho video ngắn, không blur vùng sub đáy nữa
-            if use_opaque_box and by > (vid_h * 0.6) and bh < (vid_h * 0.35):
-                continue
             if bw >= 8 and bh >= 8:
                 valid_areas.append({"x": bx, "y": by, "w": bw, "h": bh})
 
@@ -2285,7 +2267,7 @@ def generate_vtt_file(vtt_path, segments):
                 continue
             f.write(f"{idx}\n{format_vtt_time(seg['start'])} --> {format_vtt_time(seg['end'])}\n{line_text}\n\n")
 
-def generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang="vi", use_opaque_box=False):
+def generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang="vi", **kwargs):
     play_res_y = 720
     play_res_x = int(round(720 * (vid_w / max(1, vid_h))))
     ass_primary = hex_to_ass_color(text_color, 0)
@@ -2295,14 +2277,9 @@ def generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, te
     if target_lang in ("zh", "ja", "ko") and font_name in ("Tahoma", "Impact", "Courier New"):
         font_name = "Arial"
 
-    if use_opaque_box:
-        border_style = 3
-        outline_val = max(3, outline_width)
-        back_colour = "&HD0000000"
-    else:
-        border_style = 1
-        outline_val = outline_width
-        back_colour = "&H80000000"
+    border_style = 1
+    outline_val = outline_width
+    back_colour = "&H80000000"
 
     header = f"""[Script Info]
 Title: Nexus Multi-Lingual Studio
@@ -2320,7 +2297,7 @@ Style: Default,{font_name},{ass_font_size},{ass_primary},&H000000FF,{ass_outline
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    with open(ass_path, "w", encoding="utf-8-sig") as f:
+    with open(ass_path, "w", encoding="utf-8") as f:
         f.write(header)
         for seg in segments:
             line_text = (seg.get("trans") or seg.get("text") or "").strip()
@@ -3324,21 +3301,7 @@ HTML_TEMPLATE = """
                             </div>
                         </div>
 
-                        <!-- CHẾ ĐỘ SMARTSUB: NỀN CHỮ HOẶC KÍNH MỜ -->
-                        <div class="p-2.5 rounded-xl bg-slate-950 border border-sky-500/30 space-y-1.5">
-                            <div class="flex items-center justify-between">
-                                <label class="text-[11px] text-sky-300 font-bold flex items-center gap-1">
-                                    <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i> SmartSub Tự Động:
-                                </label>
-                                <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">Shorts & Long</span>
-                            </div>
-                            <select id="smartsubMode" onchange="drawOverlayOnCanvas()" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-sky-200 outline-none">
-                                <option value="auto" selected>✨ Tự động (Video ≤15p: Nền chữ bo sub gốc; >15p: Kính mờ SmartBlur)</option>
-                                <option value="opaque_box">🔳 Luôn dùng Nền Chữ Opaque Box (Che sub gốc, không cần blur)</option>
-                                <option value="blur_strip">🌫️ Luôn dùng Kính Mờ SmartBlur</option>
-                            </select>
-                            <p class="text-[10px] text-slate-400 leading-tight">Video ngắn Shorts/TikTok: AI tự quét và đặt phụ đề có hộp nền đen mờ 80% che kín sub gốc không cần blur dải.</p>
-                        </div>
+                        <input type="hidden" id="smartsubMode" value="none"/>
 
                         <!-- TỌA ĐỘ VÙNG ĐANG CHỌN -->
                         <div class="grid grid-cols-4 gap-1.5 text-center text-xs mono">
@@ -4763,7 +4726,7 @@ HTML_TEMPLATE = """
                     ctx.fillText(opacity <= 0.02 ? '✨ Kính Mờ Tự Nhiên' : `Mờ Tint ${Math.round(opacity*100)}%`, dx + 7, dy + 13);
                 }
 
-                // 3. Xem trước phụ đề (Hỗ trợ SmartSub Opaque Box nền chữ đen mờ 80% cho video <= 15p)
+                // 3. Xem trước phụ đề
                 const assScale = canvas.height / 720.0;
                 const curTime = video.currentTime;
                 let activeSub = segments.find(s => curTime >= s.start && curTime <= s.end);
@@ -4788,24 +4751,7 @@ HTML_TEMPLATE = """
                 const tx = canvas.width / 2;
                 const ty = canvas.height - drawMarginV;
 
-                // Kiểm tra xem có đang kích hoạt SmartSub Opaque Box nền chữ không
-                const isShortVideo = Boolean(video.duration && video.duration <= 900);
-                const smMode = document.getElementById('smartsubMode') ? document.getElementById('smartsubMode').value : 'auto';
-                const useOpaqueBox = (smMode === 'opaque_box') || (smMode === 'auto' && isShortVideo);
-
-                if (useOpaqueBox && previewText) {
-                    const textMetrics = ctx.measureText(previewText);
-                    const tw = textMetrics.width;
-                    const th = drawFontSize * 1.25;
-                    const padX = 10 * assScale;
-                    const padY = 4 * assScale;
-                    ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
-                    ctx.beginPath();
-                    drawSafeRoundRect(ctx, tx - (tw / 2) - padX, ty - th - padY, tw + (padX * 2), th + (padY * 2), 6 * assScale);
-                    ctx.fill();
-                }
-
-                if (outlineWidth > 0 && !useOpaqueBox) {
+                if (outlineWidth > 0) {
                     ctx.strokeStyle = outlineColor;
                     ctx.lineWidth = Math.max(1, outlineWidth * 2 * assScale);
                     ctx.lineJoin = 'round';
@@ -4839,7 +4785,6 @@ HTML_TEMPLATE = """
             const srcLang = document.getElementById('whisperSourceLang') ? document.getElementById('whisperSourceLang').value : 'auto';
             const wModel = document.getElementById('whisperModel') ? document.getElementById('whisperModel').value : 'base';
             const wDevice = document.getElementById('whisperDevice') ? document.getElementById('whisperDevice').value : 'auto';
-            const smartsubMode = document.getElementById('smartsubMode') ? document.getElementById('smartsubMode').value : 'auto';
             const allAreas = blurAreas.length > 0 ? blurAreas : (blurRect.w > 0 ? [blurRect] : []);
             return {
                 extractMode,
@@ -4852,7 +4797,6 @@ HTML_TEMPLATE = """
                 googleLangCode: lInfo.google_code,
                 blurRect,
                 blurAreas: allAreas,
-                smartsubMode: smartsubMode,
                 blurOpacity: parseInt(document.getElementById('blurOpacity').value || 0),
                 blurSigma: parseInt(document.getElementById('blurSigma').value || 22),
                 blurColor: document.getElementById('blurColor').value || '#000000',
@@ -8068,12 +8012,6 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
         except Exception as e_sb:
             print(f"[!] SmartBlur auto detect notice: {e_sb}")
 
-    is_short = bool(total_dur and float(total_dur) <= 900.0)
-    smartsub_mode = settings.get("smartsubMode", "auto")
-    use_opaque_box = (smartsub_mode == "opaque_box") or (smartsub_mode == "auto" and is_short)
-    if use_opaque_box:
-        blur_rect = {"x": 0, "y": 0, "w": 0, "h": 0}
-
     srt_path = os.path.join(work_dir, "sub_vi.srt")
     with open(srt_path, "w", encoding="utf-8") as f:
         for idx, seg in enumerate(segments, start=1):
@@ -8081,7 +8019,7 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
 
     generate_vtt_file(os.path.join(work_dir, "sub_vi.vtt"), segments)
     ass_path = os.path.join(work_dir, "sub_vi.ass")
-    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang, use_opaque_box=use_opaque_box)
+    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang)
 
     inject_dvd_bouncing_text_into_ass(ass_path, vid_w, vid_h, total_dur, ADDON_SETTINGS)
 
@@ -8203,7 +8141,7 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                     video_path = retimed_mp4
                     vid_w, vid_h, total_dur = get_video_info(video_path)
                     segments = new_segments
-                    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang, use_opaque_box=use_opaque_box)
+                    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang)
                     inject_dvd_bouncing_text_into_ass(ass_path, vid_w, vid_h, total_dur, ADDON_SETTINGS)
 
             orig_a = None
