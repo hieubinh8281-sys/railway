@@ -225,6 +225,17 @@ def create_license_key(customer="Khách hàng", duration_days=30, tier="pro", qu
     save_license_db(db)
     return key_record
 
+def is_free_trial_key(key_str, record=None):
+    """Xác định xem Key có phải bản dùng thử miễn phí đa thiết bị hay không"""
+    if not key_str:
+        return False
+    k = key_str.strip().upper()
+    if k in ("NEXUS-FREE-DEMO-2USES", "FREE-TRIAL", "FREE-DEMO") or k.startswith("NEXUS-FREE") or k.startswith("FREE-"):
+        return True
+    if record and (record.get("is_free_trial") or record.get("tier") == "free_trial"):
+        return True
+    return False
+
 def add_license_quota(key_str, extra_quota=10):
     db = load_license_db()
     if key_str in db["keys"]:
@@ -236,16 +247,37 @@ def add_license_quota(key_str, extra_quota=10):
         return True, k.get("quota_limit", 50)
     return False, "Không tìm thấy key"
 
+def set_license_quota(key_str, quota_limit=None, quota_used=None):
+    """Admin chỉnh sửa trực tiếp hạn mức (Quota Limit) và số lượt đã dùng (Quota Used)"""
+    db = load_license_db()
+    if key_str in db["keys"]:
+        k = db["keys"][key_str]
+        if quota_limit is not None:
+            try:
+                k["quota_limit"] = int(quota_limit)
+            except (ValueError, TypeError):
+                pass
+        if quota_used is not None:
+            try:
+                k["quota_used"] = max(0, int(quota_used))
+            except (ValueError, TypeError):
+                pass
+        save_license_db(db)
+        return True, k.get("quota_limit", 50), k.get("quota_used", 0)
+    return False, "Không tìm thấy key", 0
+
 def consume_license_quota(key_str, amount=1, device_id=None):
     db = load_license_db()
     if key_str in db["keys"]:
         k = db["keys"][key_str]
-        if key_str == "NEXUS-FREE-DEMO-2USES" and device_id:
+        if is_free_trial_key(key_str, k):
             dev_map = k.setdefault("device_usage", {})
-            d_used = dev_map.get(device_id, 0)
-            dev_map[device_id] = d_used + amount
+            dev_key = device_id or "DEV-UNKNOWN"
+            d_used = dev_map.get(dev_key, 0)
+            dev_map[dev_key] = d_used + amount
+            k["quota_used"] = (k.get("quota_used", 0) or 0) + amount
             save_license_db(db)
-            return True, dev_map[device_id]
+            return True, dev_map[dev_key]
         limit = k.get("quota_limit", 50)
         used = k.get("quota_used", 0)
         if limit != -1 and used >= limit:
@@ -328,14 +360,20 @@ def validate_license(key_str, device_id, client_ip="127.0.0.1", user_agent=""):
     except Exception:
         pass
 
-    # KHÓA CHẶT THIẾT BỊ (DEVICE LOCKING)
-    if key_str == "NEXUS-FREE-DEMO-2USES":
+    # KHÓA THIẾT BỊ / CHO PHÉP DÙNG THỬ ĐA THIẾT BỊ
+    if is_free_trial_key(key_str, record):
+        # Key dùng thử miễn phí: Cho phép mọi thiết bị dùng, mỗi thiết bị được hạn mức riêng (mặc định 2 lượt CPU)
         dev_map = record.setdefault("device_usage", {})
-        used = dev_map.get(device_id, 0)
-        if used >= 2:
-            return False, "Thiết bị này đã sử dụng hết 2 lượt dùng thử miễn phí! Vui lòng liên hệ Admin để nhận Key chính thức.", None
-        token = create_session_token(key_str, device_id, user_agent)
-        return True, "Kích hoạt bản dùng thử miễn phí thành công (2 lượt CPU)!", token
+        dev_key = device_id or "DEV-UNKNOWN"
+        used = dev_map.get(dev_key, 0)
+        max_free_quota = record.get("quota_limit", 2)
+        if max_free_quota != -1 and used >= max_free_quota:
+            return False, f"Thiết bị ({dev_key}) đã sử dụng hết {used}/{max_free_quota} lượt dùng thử miễn phí! Vui lòng liên hệ Admin để nâng cấp Key bản quyền chính thức.", None
+        record["last_active"] = datetime.now().isoformat()
+        save_license_db(db)
+        token = create_session_token(key_str, dev_key, user_agent)
+        remaining = max_free_quota - used if max_free_quota != -1 else "vô hạn"
+        return True, f"Kích hoạt bản dùng thử miễn phí thành công! Thiết bị của bạn còn {remaining} lượt CPU.", token
 
     bound_id = record.get("bound_device_id")
     if not bound_id:
@@ -649,6 +687,38 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- MODAL CHỈNH SỬA TRỰC TIẾP HẠN MỨC QUOTA -->
+    <div id="editQuotaModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+        <div class="admin-card rounded-2xl max-w-sm w-full p-5 space-y-4 border border-amber-500/40 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                <h3 class="text-sm font-bold text-amber-400 flex items-center gap-2">
+                    <i class="fa-solid fa-sliders"></i> Chỉnh Sửa Hạn Mức Quota
+                </h3>
+                <button onclick="closeEditQuotaModal()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="space-y-3">
+                <div>
+                    <label class="text-xs text-slate-400">License Key:</label>
+                    <input type="text" id="eqKeyInput" readonly class="w-full mt-1 bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs font-mono font-bold text-amber-300 outline-none select-all"/>
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">Hạn mức tối đa (Quota Limit):</label>
+                    <input type="number" id="eqLimitInput" min="-1" placeholder="-1 = Vô hạn" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs font-mono font-bold text-sky-400 outline-none focus:border-amber-400"/>
+                    <p class="text-[10px] text-slate-500 mt-0.5">Nhập số lượt render tùy ý (hoặc -1 nếu muốn vô hạn lượt)</p>
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">Số lượt đã dùng (Quota Used):</label>
+                    <input type="number" id="eqUsedInput" min="0" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs font-mono font-bold text-rose-400 outline-none focus:border-amber-400"/>
+                    <p class="text-[10px] text-slate-500 mt-0.5">Đặt về 0 để reset toàn bộ lượt đã dùng của key này</p>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 pt-2">
+                <button onclick="closeEditQuotaModal()" class="px-3 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-300">Hủy</button>
+                <button onclick="submitSetQuota()" class="px-4 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-indigo-600 hover:brightness-110 text-xs font-bold text-white">Lưu Thay Đổi</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let adminToken = sessionStorage.getItem('nexus_admin_token') || '';
 
@@ -767,8 +837,11 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
                     <td class="py-3 px-3">${boundDev}</td>
                     <td class="py-3 px-3">${statusBadge}</td>
                     <td class="py-3 px-3 text-center whitespace-nowrap">
-                        <button onclick="addQuota('${k.key}', 10)" title="Nạp thêm 10 lượt render" class="px-2 py-1 rounded bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 text-[11px] font-bold mr-1 transition">
-                            +10 Quota
+                        <button onclick="openSetQuotaModal('${k.key}', ${k.quota_limit}, ${k.quota_used || 0})" title="Chỉnh sửa trực tiếp hạn mức Quota" class="px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 text-[11px] font-bold mr-1 transition">
+                            <i class="fa-solid fa-pen-to-square mr-0.5"></i> Sửa Quota
+                        </button>
+                        <button onclick="addQuota('${k.key}', 10)" title="Nạp nhanh 10 lượt render" class="px-2 py-1 rounded bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 text-[11px] font-bold mr-1 transition">
+                            +10
                         </button>
                         <button onclick="resetDevice('${k.key}')" title="Mở khóa thiết bị (cho khách đổi máy mới)" class="px-2 py-1 rounded bg-sky-500/15 hover:bg-sky-500/30 text-sky-300 text-[11px] font-semibold mr-1 transition">
                             <i class="fa-solid fa-arrow-rotate-left mr-0.5"></i> Đổi máy
@@ -841,6 +914,42 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
                     loadKeysList();
                 } else {
                     alert(d.error || "Lỗi nạp quota");
+                }
+            } catch (e) {
+                alert("Lỗi: " + e);
+            }
+        }
+
+        function openSetQuotaModal(key, limit, used) {
+            document.getElementById('eqKeyInput').value = key;
+            document.getElementById('eqLimitInput').value = (limit !== undefined && limit !== null) ? limit : 50;
+            document.getElementById('eqUsedInput').value = used || 0;
+            document.getElementById('editQuotaModal').classList.remove('hidden');
+            document.getElementById('editQuotaModal').classList.add('flex');
+        }
+
+        function closeEditQuotaModal() {
+            document.getElementById('editQuotaModal').classList.add('hidden');
+            document.getElementById('editQuotaModal').classList.remove('flex');
+        }
+
+        async function submitSetQuota() {
+            const k = document.getElementById('eqKeyInput').value;
+            const limit = parseInt(document.getElementById('eqLimitInput').value);
+            const used = parseInt(document.getElementById('eqUsedInput').value);
+            try {
+                const res = await fetch('/api/admin/set_quota', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+                    body: JSON.stringify({ key: k, quota_limit: limit, quota_used: used })
+                });
+                const d = await res.json();
+                if (d.status === 'ok') {
+                    closeEditQuotaModal();
+                    alert(`✅ ĐÃ CẬP NHẬT HẠN MỨC!\n\nKey: ${k}\nHạn mức mới: ${d.quota_limit === -1 ? 'Vô hạn' : d.quota_limit + ' lượt'}\nĐã dùng: ${d.quota_used} lượt.`);
+                    loadKeysList();
+                } else {
+                    alert(d.error || "Lỗi cập nhật hạn mức");
                 }
             } catch (e) {
                 alert("Lỗi: " + e);
@@ -1044,6 +1153,27 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
                     videosHtml = '<span class="text-slate-500 italic text-[11px]">Chưa có video nào tải lên hoặc render xong</span>';
                 }
 
+                // Lịch sử video đã làm (5-7 ngày)
+                let historyHtml = '';
+                if (w.history && w.history.length > 0) {
+                    historyHtml = `<div class="mt-2 pt-2 border-t border-slate-800">
+                        <div class="text-[10px] font-bold text-amber-400 mb-1 flex items-center justify-between">
+                            <span><i class="fa-solid fa-clock-rotate-left mr-1"></i>Lịch Sử Đã Render:</span>
+                            <span class="text-slate-500">${w.history.length} video</span>
+                        </div>
+                        <div class="space-y-1 max-h-28 overflow-y-auto">` +
+                        w.history.map(h => `
+                            <div class="flex items-center justify-between text-[10px] bg-slate-900/90 px-2 py-1 rounded border border-slate-800 gap-1.5">
+                                <span class="truncate text-slate-300" title="${h.title}">${h.title}</span>
+                                <div class="flex items-center gap-1.5 shrink-0">
+                                    <span class="text-amber-400 font-mono">${h.file_size_mb || 0}MB</span>
+                                    <button onclick="openAdminVideo('${h.preview_url}', '${w.customer} - ${h.title}', '${h.download_url}')" class="text-sky-400 hover:text-white px-1" title="Xem video"><i class="fa-solid fa-play"></i></button>
+                                    ${h.gofile_url ? `<a href="${h.gofile_url}" target="_blank" class="text-emerald-400 hover:text-white px-0.5" title="Mở link GoFile"><i class="fa-solid fa-cloud-arrow-down"></i></a>` : ''}
+                                </div>
+                            </div>
+                        `).join('') + `</div></div>`;
+                }
+
                 // Jobs status
                 let jobsBadge = '';
                 if (w.jobs && w.jobs.length > 0) {
@@ -1079,6 +1209,7 @@ ADMIN_PAGE_HTML = """<!DOCTYPE html>
                     <td class="py-3.5 px-3 space-y-1.5 max-w-xs">
                         ${jobsBadge}
                         ${videosHtml}
+                        ${historyHtml}
                     </td>
 
                     <td class="py-3.5 px-3 text-center whitespace-nowrap">
