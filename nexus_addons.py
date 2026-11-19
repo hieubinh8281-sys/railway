@@ -368,42 +368,76 @@ def inject_dvd_bouncing_text_into_ass(ass_path, vid_w, vid_h, total_dur, addon_c
 
 def build_filter_complex_with_logo(
     vid_w, vid_h, blur_rect, blur_sigma, blur_opacity, blur_color,
-    ass_filename="sub_vi.ass", logo_path=None, addon_cfg=None
+    ass_filename="sub_vi.ass", logo_path=None, addon_cfg=None, blur_areas=None
 ):
     """
     Tạo chuỗi -filter_complex kết hợp:
-    1. Vùng làm mờ SmartBlur (Full-Row hoặc tùy chỉnh)
+    1. Vùng làm mờ SmartBlur sâu & tự nhiên (Hỗ trợ 1 hoặc nhiều vùng: Multi-area Blur)
     2. Phụ đề chính + Chữ mờ chạy kiểu DVD (trong file .ASS)
     3. Logo chống bản quyền (Đứng yên ở góc hoặc Bay nảy kiểu DVD)
     Returns: (vf_chain_str, has_logo_input_bool)
     """
     cfg = addon_cfg or ADDON_SETTINGS
-    bx = max(0, int(blur_rect.get("x", 0)) // 2 * 2)
-    by = max(0, int(blur_rect.get("y", 0)) // 2 * 2)
-    bw = max(0, int(blur_rect.get("w", 0)) // 2 * 2)
-    bh = max(0, int(blur_rect.get("h", 0)) // 2 * 2)
-
-    if vid_w and vid_h:
-        bw = 0 if bx >= vid_w - 4 else min(bw, (vid_w - bx) // 2 * 2)
-        bh = 0 if by >= vid_h - 4 else min(bh, (vid_h - by) // 2 * 2)
-
     blur_color_clean = (blur_color or "000000").lstrip("#")
     escaped_ass = (ass_filename or "sub_vi.ass").replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
-    if bw >= 8 and bh >= 8:
-        b_steps = [f"crop={bw}:{bh}:{bx}:{by}"]
-        # Kính mờ tự nhiên chuẩn Studio cao cấp (không viền đen, không ám màu)
-        if blur_sigma > 0:
-            b_steps.append(f"boxblur=luma_radius={blur_sigma}:luma_power=1")
+    # Chuẩn bị danh sách các vùng làm mờ (Multi-area blur: che sub, logo bản quyền, watermark...)
+    raw_areas = []
+    if blur_areas and isinstance(blur_areas, list) and len(blur_areas) > 0:
+        raw_areas = list(blur_areas)
+    elif blur_rect and isinstance(blur_rect, dict) and blur_rect.get("w", 0) > 0 and blur_rect.get("h", 0) > 0:
+        raw_areas = [blur_rect]
+
+    valid_areas = []
+    for rect in raw_areas:
+        bx = max(0, int(rect.get("x", 0)) // 2 * 2)
+        by = max(0, int(rect.get("y", 0)) // 2 * 2)
+        bw = max(0, int(rect.get("w", 0)) // 2 * 2)
+        bh = max(0, int(rect.get("h", 0)) // 2 * 2)
+        if vid_w and vid_h:
+            bw = 0 if bx >= vid_w - 4 else min(bw, (vid_w - bx) // 2 * 2)
+            bh = 0 if by >= vid_h - 4 else min(bh, (vid_h - by) // 2 * 2)
+        if bw >= 8 and bh >= 8:
+            valid_areas.append({"x": bx, "y": by, "w": bw, "h": bh})
+
+    # Kính mờ quang học tự nhiên xóa triệt để chữ gốc không để lại bóng
+    eff_sigma = max(10, blur_sigma if blur_sigma and blur_sigma > 0 else 22)
+
+    if len(valid_areas) == 0:
+        base_chain = f"[0:v]ass=\\'{escaped_ass}\\'[v_sub]"
+    elif len(valid_areas) == 1:
+        a = valid_areas[0]
+        b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
+        # Kết hợp avgblur làm mịn chi tiết và boxblur lũy thừa 2 xóa triệt để chữ
+        b_steps.append(f"avgblur=sizeX={eff_sigma}:sizeY={eff_sigma}:planes=7")
+        b_steps.append(f"boxblur=luma_radius={eff_sigma}:luma_power=2:chroma_radius={eff_sigma}")
         if blur_opacity > 0.02:
-            b_steps.append(f"drawbox=x=0:y=0:w={bw}:h={bh}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
+            b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
         base_chain = (
             f"[0:v]split=2[main][cs];"
             f"[cs]{','.join(b_steps)}[bl];"
-            f"[main][bl]overlay={bx}:{by}:shortest=1,ass=\\'{escaped_ass}\\'[v_sub]"
+            f"[main][bl]overlay={a['x']}:{a['y']}:shortest=1,ass=\\'{escaped_ass}\\'[v_sub]"
         )
     else:
-        base_chain = f"[0:v]ass=\\'{escaped_ass}\\'[v_sub]"
+        # Đa vùng làm mờ (Multi-area blur)
+        n = len(valid_areas)
+        split_names = "".join([f"[cs{i}]" for i in range(n)])
+        chain_parts = [f"[0:v]split={n+1}[main]{split_names}"]
+        for i, a in enumerate(valid_areas):
+            b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
+            b_steps.append(f"avgblur=sizeX={eff_sigma}:sizeY={eff_sigma}:planes=7")
+            b_steps.append(f"boxblur=luma_radius={eff_sigma}:luma_power=2:chroma_radius={eff_sigma}")
+            if blur_opacity > 0.02:
+                b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
+            chain_parts.append(f"[cs{i}]{','.join(b_steps)}[bl{i}]")
+
+        last_layer = "[main]"
+        for i, a in enumerate(valid_areas):
+            next_layer = f"[tmp{i}]" if i < n - 1 else "[v_bl]"
+            chain_parts.append(f"{last_layer}[bl{i}]overlay={a['x']}:{a['y']}:shortest=1{next_layer}")
+            last_layer = next_layer
+        chain_parts.append(f"[v_bl]ass=\\'{escaped_ass}\\'[v_sub]")
+        base_chain = ";".join(chain_parts)
 
     use_logo = bool(cfg.get("logo_enabled") and logo_path and os.path.exists(logo_path))
     if not use_logo:
