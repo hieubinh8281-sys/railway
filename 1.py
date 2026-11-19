@@ -2002,8 +2002,13 @@ def dispatch_github_vps_worker(job_id, relay_url=None, ws_id=None):
         "X-GitHub-Api-Version": "2022-11-28"
     }
 
-    if not relay_url:
-        relay_url = get_public_relay_url()
+    if not relay_url or "127.0.0.1" in relay_url or "localhost" in relay_url:
+        cand = get_public_relay_url()
+        if cand and "127.0.0.1" not in cand and "localhost" not in cand:
+            relay_url = cand
+    relay_url = (relay_url or "").rstrip("/")
+    if relay_url and not relay_url.startswith("http://") and not relay_url.startswith("https://"):
+        relay_url = f"https://{relay_url}"
 
     if not relay_url:
         raise RuntimeError("Trạm Trung Chuyển chưa xác định được URL công khai! Hãy mở trang web qua link Railway .up.railway.app rồi thử lại.")
@@ -2054,8 +2059,20 @@ jobs:
           python -m pip install -q av faster-whisper edge-tts pydub Pillow requests numpy
       - name: Run Autonomous Pipeline & Auto-Shutdown
         run: |
-          curl -sSL "${{ github.event.inputs.relay_url }}/api/relay/job/${{ github.event.inputs.job_id }}/worker.py" -o worker.py
-          python worker.py
+          echo "=========================================================="
+          echo "Connecting to Nexus Relay Gateway: ${{ github.event.inputs.relay_url }}"
+          echo "Job ID: ${{ github.event.inputs.job_id }}"
+          echo "=========================================================="
+          curl -f -sSL "${{ github.event.inputs.relay_url }}/api/relay/job/${{ github.event.inputs.job_id }}/worker.py" -o worker.py || {
+            echo "Failed to download worker.py from Relay Gateway! URL: ${{ github.event.inputs.relay_url }}/api/relay/job/${{ github.event.inputs.job_id }}/worker.py"
+            exit 1
+          }
+          if [ ! -s worker.py ]; then
+            echo "Downloaded worker.py is empty (0 bytes)!"
+            exit 1
+          fi
+          echo "worker.py downloaded successfully ($(wc -c < worker.py) bytes). Starting pipeline 24/7..."
+          python -u worker.py
       - name: Archive Completed Video as GitHub Artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -2438,94 +2455,75 @@ HTML_TEMPLATE = """
             box-shadow: 0 4px 14px var(--accent-glow), 0 0 28px var(--neon-glow) !important;
         }
 
-        /* ========== DEEP SPACE BACKGROUND ========== */
+        /* ========== DEEP SPACE BACKGROUND (OPTIMIZED 60FPS) ========== */
         body {
             background-color: var(--bg-deep);
             background-image:
-                radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.07) 0px, transparent 50%),
-                radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.08) 0px, transparent 50%),
-                radial-gradient(at 50% 100%, rgba(14, 165, 233, 0.04) 0px, transparent 55%),
+                radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.08) 0px, transparent 45%),
+                radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.08) 0px, transparent 45%),
+                radial-gradient(at 50% 100%, rgba(14, 165, 233, 0.05) 0px, transparent 50%),
                 radial-gradient(at 70% 30%, rgba(99, 102, 241, 0.06) 0px, transparent 40%);
             color: #f1f5f9;
             font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
             overflow: hidden;
             position: relative;
         }
-        /* Animated grid overlay */
+        /* Static sleek grid overlay - 0% CPU overhead */
         body::before {
             content: '';
             position: fixed;
             inset: 0;
             background-image:
-                linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+                linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px);
             background-size: 60px 60px;
-            animation: gridScroll 12s linear infinite;
             pointer-events: none;
             z-index: 0;
-        }
-        /* Nebula floating orb */
-        body::after {
-            content: '';
-            position: fixed;
-            top: 10%;
-            left: 50%;
-            width: 600px;
-            height: 600px;
-            border-radius: 50%;
-            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
-            filter: blur(100px);
-            animation: nebulaFloat 15s ease-in-out infinite;
-            pointer-events: none;
-            z-index: 0;
-            transform: translateX(-50%);
+            transform: translateZ(0);
         }
 
         /* ========== TYPOGRAPHY ========== */
         .mono { font-family: 'JetBrains Mono', monospace; }
 
-        /* ========== GLASSMORPHISM PANELS ========== */
+        /* ========== GLASSMORPHISM PANELS (OPTIMIZED COMPOSITING) ========== */
         .studio-panel {
             background: var(--panel-glass);
             border: 1px solid var(--border-subtle);
             box-shadow:
-                0 20px 50px -12px rgba(0, 0, 0, 0.9),
+                0 16px 40px -12px rgba(0, 0, 0, 0.8),
                 0 0 1px 0 rgba(255, 255, 255, 0.05),
                 inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
-            backdrop-filter: blur(20px) saturate(1.4);
-            -webkit-backdrop-filter: blur(20px) saturate(1.4);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
             border-radius: 16px;
-            transition: box-shadow 0.3s ease, border-color 0.3s ease;
+            transition: border-color 0.2s ease;
             position: relative;
             z-index: 1;
+            transform: translateZ(0);
         }
         .studio-panel:hover {
-            border-color: rgba(255, 255, 255, 0.1);
-            box-shadow:
-                0 24px 60px -12px rgba(0, 0, 0, 0.9),
-                0 0 1px 0 rgba(255, 255, 255, 0.07),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.12);
         }
 
         .studio-card {
             background: var(--card-bg);
             border: 1px solid var(--border-subtle);
-            backdrop-filter: blur(12px) saturate(1.2);
-            -webkit-backdrop-filter: blur(12px) saturate(1.2);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
             border-radius: 14px;
             box-shadow:
-                0 8px 24px -6px rgba(0, 0, 0, 0.6),
+                0 6px 20px -4px rgba(0, 0, 0, 0.5),
                 inset 0 1px 0 0 rgba(255, 255, 255, 0.03);
-            transition: all 0.3s ease;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
             position: relative;
             z-index: 1;
+            transform: translateZ(0);
         }
         .studio-card:hover {
             border-color: var(--border-glow);
             box-shadow:
                 0 8px 24px -6px rgba(0, 0, 0, 0.6),
-                0 0 16px var(--neon-glow),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+                0 0 14px var(--neon-glow);
         }
 
         /* ========== NAVIGATION PILLS ========== */
@@ -2646,55 +2644,28 @@ HTML_TEMPLATE = """
             text-shadow: 0 0 8px var(--neon-glow);
         }
 
-        /* ========== PROGRESS BAR GLOW ========== */
+        /* ========== PROGRESS BAR GLOW (OPTIMIZED) ========== */
         #progressBar, #mobProgressBar {
-            animation: neonPulse 2.5s ease-in-out infinite;
             box-shadow: 0 0 10px var(--accent-glow);
             border-radius: 999px;
+            transition: width 0.3s ease;
         }
 
-        /* ========== HOLOGRAPHIC HEADER SHIMMER ========== */
+        /* ========== HOLOGRAPHIC HEADER (CLEAN & FAST) ========== */
         .holo-header {
             position: relative;
             overflow: hidden;
         }
-        .holo-header::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: linear-gradient(
-                105deg,
-                transparent 20%,
-                rgba(255, 255, 255, 0.03) 30%,
-                rgba(255, 255, 255, 0.06) 40%,
-                rgba(255, 255, 255, 0.03) 50%,
-                transparent 60%
-            );
-            background-size: 200% 100%;
-            animation: holographicSheen 8s ease-in-out infinite;
-            pointer-events: none;
-            z-index: 1;
-        }
-
-        /* ========== ENHANCED BADGES ========== */
-        .badge-glow {
-            animation: glowBreath 3s ease-in-out infinite;
-        }
 
         /* ========== TOAST NOTIFICATION GLOW ========== */
         .toast-glow {
-            box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 20px var(--accent-glow), 0 0 40px var(--neon-glow) !important;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 16px var(--accent-glow) !important;
             border-color: var(--accent-border) !important;
-            animation: borderGlow 2s ease-in-out infinite;
         }
 
         /* ========== MOBILE PROGRESS HUD GLOW ========== */
         .mobile-hud-glow {
-            box-shadow: 0 10px 40px rgba(0,0,0,0.7), 0 0 24px var(--accent-glow), 0 0 50px var(--neon-glow) !important;
-            animation: glowBreath 3s ease-in-out infinite;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.7), 0 0 20px var(--accent-glow) !important;
         }
 
         /* ========== ENHANCED SELECT DROPDOWNS ========== */
@@ -2750,9 +2721,15 @@ HTML_TEMPLATE = """
         }
         body.is-mobile .studio-panel {
             border-radius: 16px !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            background: rgba(10, 15, 28, 0.96) !important;
         }
         body.is-mobile .studio-card {
             border-radius: 14px !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            background: rgba(14, 20, 36, 0.94) !important;
         }
         body.is-mobile button {
             -webkit-tap-highlight-color: transparent;
@@ -4337,7 +4314,9 @@ HTML_TEMPLATE = """
                         apiKeys,
                         geminiModel: document.getElementById('geminiModel').value,
                         whisperModel: document.getElementById('whisperModel').value,
-                        settings: getSettingsObject()
+                        settings: getSettingsObject(),
+                        relay_url: window.location.origin,
+                        origin: window.location.origin
                     })
                 });
                 const startData = await startRes.json();
@@ -4348,16 +4327,24 @@ HTML_TEMPLATE = """
                     alert(startData.error);
                     return false;
                 }
+                if (startData.job_id) {
+                    localStorage.setItem('active_server_job_id', startData.job_id);
+                }
 
+                let lastCloudSegmentsChecksum = "";
                 while (true) {
                     await new Promise(r => setTimeout(r, 1500));
                     const stRes = await fetch('/api/relay/job_state');
                     const stData = await stRes.json();
 
                     if (stData.segments && stData.segments.length > 0) {
-                        segments = stData.segments;
-                        renderSubTable();
-                        drawOverlayOnCanvas();
+                        const newChecksum = JSON.stringify(stData.segments);
+                        if (newChecksum !== lastCloudSegmentsChecksum) {
+                            lastCloudSegmentsChecksum = newChecksum;
+                            segments = stData.segments;
+                            renderSubTable();
+                            scheduleDrawOverlay();
+                        }
                     }
                     if (stData.locked_context) {
                         document.getElementById('contextGlossary').value = stData.locked_context;
@@ -4508,7 +4495,7 @@ HTML_TEMPLATE = """
         }
 
         video.addEventListener('loadedmetadata', syncCanvasSize);
-        video.addEventListener('timeupdate', drawOverlayOnCanvas);
+        video.addEventListener('timeupdate', scheduleDrawOverlay);
         window.addEventListener('resize', syncCanvasSize);
 
         function toggleCanvasLock() {
@@ -4601,119 +4588,175 @@ HTML_TEMPLATE = """
             `).join('');
         }
 
-        function drawOverlayOnCanvas() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            if (!video.videoWidth || !canvas.height) return;
-
-            const scaleX = canvas.width / video.videoWidth;
-            const scaleY = canvas.height / video.videoHeight;
-            const opacity = parseInt(document.getElementById('blurOpacity').value || 0) / 100.0;
-            const blurColor = document.getElementById('blurColor').value || '#000000';
-
-            // 1. Vẽ các vùng trong danh sách Đa Vùng (blurAreas)
-            blurAreas.forEach((area, i) => {
-                const ax = area.x * scaleX;
-                const ay = area.y * scaleY;
-                const aw = area.w * scaleX;
-                const ah = area.h * scaleY;
-                if (opacity > 0.02) {
-                    ctx.fillStyle = hexToRgba(blurColor, opacity);
-                    ctx.fillRect(ax, ay, aw, ah);
-                } else {
-                    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
-                    ctx.fillRect(ax, ay, aw, ah);
+        let _overlayAnimFrame = null;
+        let lastActiveSubIdx = -1;
+        function updateActiveSubHighlight() {
+            if (!video || !segments || !segments.length) return;
+            const ct = video.currentTime;
+            let foundIdx = -1;
+            for (let i = 0; i < segments.length; i++) {
+                if (ct >= segments[i].start && ct <= segments[i].end) {
+                    foundIdx = i;
+                    break;
                 }
-                ctx.strokeStyle = '#a855f7';
-                ctx.lineWidth = 1.5;
-                ctx.setLineDash([4, 2]);
-                ctx.strokeRect(ax, ay, aw, ah);
-                ctx.setLineDash([]);
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-                ctx.fillRect(ax + 2, ay + 2, 70, 15);
-                ctx.fillStyle = '#d8b4fe';
-                ctx.font = 'bold 9px sans-serif';
-                ctx.fillText(`Vùng #${i+1}`, ax + 5, ay + 13);
+            }
+            if (foundIdx !== lastActiveSubIdx) {
+                if (lastActiveSubIdx >= 0) {
+                    const oldRow = document.getElementById(`subRow_${lastActiveSubIdx}`);
+                    if (oldRow) {
+                        oldRow.classList.remove('bg-sky-500/20', 'border-l-4', 'border-sky-400');
+                    }
+                }
+                if (foundIdx >= 0) {
+                    const newRow = document.getElementById(`subRow_${foundIdx}`);
+                    if (newRow) {
+                        newRow.classList.add('bg-sky-500/20', 'border-l-4', 'border-sky-400');
+                    }
+                }
+                lastActiveSubIdx = foundIdx;
+            }
+        }
+
+        function scheduleDrawOverlay() {
+            if (_overlayAnimFrame) return;
+            _overlayAnimFrame = requestAnimationFrame(() => {
+                _overlayAnimFrame = null;
+                drawOverlayOnCanvas();
+                updateActiveSubHighlight();
             });
+        }
 
-            // 2. Vẽ vùng đang kéo chuột hiện tại (blurRect)
-            if (blurRect.w > 0 && blurRect.h > 0) {
-                const dx = blurRect.x * scaleX;
-                const dy = blurRect.y * scaleY;
-                const dw = blurRect.w * scaleX;
-                const dh = blurRect.h * scaleY;
+        function drawSafeRoundRect(c, x, y, w, h, r) {
+            if (c.roundRect) {
+                c.roundRect(x, y, w, h, r);
+            } else if (c.arcTo) {
+                c.moveTo(x + r, y);
+                c.arcTo(x + w, y, x + w, y + h, r);
+                c.arcTo(x + w, y + h, x, y + h, r);
+                c.arcTo(x, y + h, x, y, r);
+                c.arcTo(x, y, x + w, y, r);
+                c.closePath();
+            } else {
+                c.rect(x, y, w, h);
+            }
+        }
 
-                if (opacity > 0.02) {
-                    ctx.fillStyle = hexToRgba(blurColor, opacity);
-                    ctx.fillRect(dx, dy, dw, dh);
-                } else {
-                    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
-                    ctx.fillRect(dx, dy, dw, dh);
+        function drawOverlayOnCanvas() {
+            try {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (!video.videoWidth || !canvas.height) return;
+
+                const scaleX = canvas.width / video.videoWidth;
+                const scaleY = canvas.height / video.videoHeight;
+                const opacity = parseInt(document.getElementById('blurOpacity').value || 0) / 100.0;
+                const blurColor = document.getElementById('blurColor').value || '#000000';
+
+                // 1. Vẽ các vùng trong danh sách Đa Vùng (blurAreas)
+                blurAreas.forEach((area, i) => {
+                    const ax = area.x * scaleX;
+                    const ay = area.y * scaleY;
+                    const aw = area.w * scaleX;
+                    const ah = area.h * scaleY;
+                    if (opacity > 0.02) {
+                        ctx.fillStyle = hexToRgba(blurColor, opacity);
+                        ctx.fillRect(ax, ay, aw, ah);
+                    } else {
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+                        ctx.fillRect(ax, ay, aw, ah);
+                    }
+                    ctx.strokeStyle = '#a855f7';
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([4, 2]);
+                    ctx.strokeRect(ax, ay, aw, ah);
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                    ctx.fillRect(ax + 2, ay + 2, 70, 15);
+                    ctx.fillStyle = '#d8b4fe';
+                    ctx.font = 'bold 9px sans-serif';
+                    ctx.fillText(`Vùng #${i+1}`, ax + 5, ay + 13);
+                });
+
+                // 2. Vẽ vùng đang kéo chuột hiện tại (blurRect)
+                if (blurRect.w > 0 && blurRect.h > 0) {
+                    const dx = blurRect.x * scaleX;
+                    const dy = blurRect.y * scaleY;
+                    const dw = blurRect.w * scaleX;
+                    const dh = blurRect.h * scaleY;
+
+                    if (opacity > 0.02) {
+                        ctx.fillStyle = hexToRgba(blurColor, opacity);
+                        ctx.fillRect(dx, dy, dw, dh);
+                    } else {
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+                        ctx.fillRect(dx, dy, dw, dh);
+                    }
+                    ctx.strokeStyle = extractMode === 'ocr' ? '#38bdf8' : '#f59e0b';
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([5, 3]);
+                    ctx.strokeRect(dx, dy, dw, dh);
+                    ctx.setLineDash([]);
+
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                    ctx.fillRect(dx + 3, dy + 1, 140, 17);
+                    ctx.fillStyle = '#fef08a';
+                    ctx.font = 'bold 9px sans-serif';
+                    ctx.fillText(opacity <= 0.02 ? '✨ Kính Mờ Tự Nhiên' : `Mờ Tint ${Math.round(opacity*100)}%`, dx + 7, dy + 13);
                 }
-                ctx.strokeStyle = extractMode === 'ocr' ? '#38bdf8' : '#f59e0b';
-                ctx.lineWidth = 1.5;
-                ctx.setLineDash([5, 3]);
-                ctx.strokeRect(dx, dy, dw, dh);
-                ctx.setLineDash([]);
 
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-                ctx.fillRect(dx + 3, dy + 3, 140, 17);
-                ctx.fillStyle = '#fef08a';
-                ctx.font = 'bold 9px sans-serif';
-                ctx.fillText(opacity <= 0.02 ? '✨ Kính Mờ Tự Nhiên' : `Mờ Tint ${Math.round(opacity*100)}%`, dx + 7, dy + 15);
+                // 3. Xem trước phụ đề (Hỗ trợ SmartSub Opaque Box nền chữ đen mờ 80% cho video <= 15p)
+                const assScale = canvas.height / 720.0;
+                const curTime = video.currentTime;
+                let activeSub = segments.find(s => curTime >= s.start && curTime <= s.end);
+                let previewText = activeSub
+                    ? (activeSub.trans || activeSub.text)
+                    : (segments.length > 0 ? (segments[0].trans || segments[0].text) : "Xem trước phụ đề chuẩn tỷ lệ 1:1");
+
+                const fontName = document.getElementById('fontName').value || 'Arial';
+                const fontSize = parseInt(document.getElementById('fontSize').value || 22);
+                const marginV = parseInt(document.getElementById('marginV').value || 28);
+                const textColor = document.getElementById('textColor').value || '#E1FF00';
+                const outlineColor = document.getElementById('outlineColor').value || '#000000';
+                const outlineWidth = parseInt(document.getElementById('outlineWidth').value || 2);
+
+                const drawFontSize = Math.max(9, fontSize * assScale);
+                const drawMarginV = marginV * assScale;
+
+                ctx.font = `bold ${drawFontSize.toFixed(1)}px "${fontName}", sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'bottom';
+
+                const tx = canvas.width / 2;
+                const ty = canvas.height - drawMarginV;
+
+                // Kiểm tra xem có đang kích hoạt SmartSub Opaque Box nền chữ không
+                const isShortVideo = Boolean(video.duration && video.duration <= 900);
+                const smMode = document.getElementById('smartsubMode') ? document.getElementById('smartsubMode').value : 'auto';
+                const useOpaqueBox = (smMode === 'opaque_box') || (smMode === 'auto' && isShortVideo);
+
+                if (useOpaqueBox && previewText) {
+                    const textMetrics = ctx.measureText(previewText);
+                    const tw = textMetrics.width;
+                    const th = drawFontSize * 1.25;
+                    const padX = 10 * assScale;
+                    const padY = 4 * assScale;
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+                    ctx.beginPath();
+                    drawSafeRoundRect(ctx, tx - (tw / 2) - padX, ty - th - padY, tw + (padX * 2), th + (padY * 2), 6 * assScale);
+                    ctx.fill();
+                }
+
+                if (outlineWidth > 0 && !useOpaqueBox) {
+                    ctx.strokeStyle = outlineColor;
+                    ctx.lineWidth = Math.max(1, outlineWidth * 2 * assScale);
+                    ctx.lineJoin = 'round';
+                    ctx.miterLimit = 2;
+                    ctx.strokeText(previewText, tx, ty);
+                }
+                ctx.fillStyle = textColor;
+                ctx.fillText(previewText, tx, ty);
+            } catch (errCanvas) {
+                // Bảo vệ không crash luồng giao diện
             }
-
-            // 3. Xem trước phụ đề (Hỗ trợ SmartSub Opaque Box nền chữ đen mờ 80% cho video <= 15p)
-            const assScale = canvas.height / 720.0;
-            const curTime = video.currentTime;
-            let activeSub = segments.find(s => curTime >= s.start && curTime <= s.end);
-            let previewText = activeSub
-                ? (activeSub.trans || activeSub.text)
-                : (segments.length > 0 ? (segments[0].trans || segments[0].text) : "Xem trước phụ đề chuẩn tỷ lệ 1:1");
-
-            const fontName = document.getElementById('fontName').value || 'Arial';
-            const fontSize = parseInt(document.getElementById('fontSize').value || 22);
-            const marginV = parseInt(document.getElementById('marginV').value || 28);
-            const textColor = document.getElementById('textColor').value || '#E1FF00';
-            const outlineColor = document.getElementById('outlineColor').value || '#000000';
-            const outlineWidth = parseInt(document.getElementById('outlineWidth').value || 2);
-
-            const drawFontSize = Math.max(9, fontSize * assScale);
-            const drawMarginV = marginV * assScale;
-
-            ctx.font = `bold ${drawFontSize.toFixed(1)}px "${fontName}", sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'bottom';
-
-            const tx = canvas.width / 2;
-            const ty = canvas.height - drawMarginV;
-
-            // Kiểm tra xem có đang kích hoạt SmartSub Opaque Box nền chữ không
-            const isShortVideo = Boolean(video.duration && video.duration <= 900);
-            const smMode = document.getElementById('smartsubMode') ? document.getElementById('smartsubMode').value : 'auto';
-            const useOpaqueBox = (smMode === 'opaque_box') || (smMode === 'auto' && isShortVideo);
-
-            if (useOpaqueBox && previewText) {
-                // Hiển thị hộp nền chữ Opaque Box bo sát chữ (BorderStyle: 3)
-                const textMetrics = ctx.measureText(previewText);
-                const tw = textMetrics.width;
-                const th = drawFontSize * 1.25;
-                const padX = 10 * assScale;
-                const padY = 4 * assScale;
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.82)'; // Nền đen trong suốt 82% sang trọng
-                ctx.beginPath();
-                ctx.roundRect(tx - (tw / 2) - padX, ty - th - padY, tw + (padX * 2), th + (padY * 2), 6 * assScale);
-                ctx.fill();
-            }
-
-            if (outlineWidth > 0 && !useOpaqueBox) {
-                ctx.strokeStyle = outlineColor;
-                ctx.lineWidth = Math.max(1, outlineWidth * 2 * assScale);
-                ctx.lineJoin = 'round';
-                ctx.miterLimit = 2;
-                ctx.strokeText(previewText, tx, ty);
-            }
-            ctx.fillStyle = textColor;
-            ctx.fillText(previewText, tx, ty);
         }
 
         function clearBlurBox() {
@@ -5051,6 +5094,7 @@ HTML_TEMPLATE = """
         }
 
         function renderSubTable() {
+            lastActiveSubIdx = -1;
             const tbody = document.getElementById('subTableBody');
             const keyword = (document.getElementById('searchSub').value || '').toLowerCase();
             document.getElementById('subCount').innerText = `${segments.length} câu`;
@@ -5065,7 +5109,7 @@ HTML_TEMPLATE = """
                     return '';
                 }
                 return `
-                <tr class="hover:bg-slate-900/60 transition">
+                <tr id="subRow_${idx}" class="hover:bg-slate-900/60 transition-colors duration-150">
                     <td class="py-2 px-3 text-slate-500 mono">${s.id}</td>
                     <td class="py-2 px-3 mono">
                         <button onclick="seekVideo(${s.start})" class="text-sky-400 hover:text-sky-300 hover:underline flex items-center gap-1">
@@ -6254,7 +6298,9 @@ HTML_TEMPLATE = """
                         apiKeys: apiKeys,
                         engine: engine,
                         segments: segments,
-                        device_id: devId
+                        device_id: devId,
+                        relay_url: window.location.origin,
+                        origin: window.location.origin
                     })
                 });
 
@@ -6709,29 +6755,36 @@ def api_cloud_dispatch():
         "output_ready": False
     })
 
+    job_state_dict = {
+        "job_id": job_id,
+        "device_id": dev_id,
+        "workspace_id": ws_id,
+        "status": "running",
+        "percent": 5,
+        "message": f"Đang khởi tạo tiến trình {provider.upper()}...",
+        "source_url": f"/api/pipeline/job_video/{job_id}/input_video.mp4",
+        "created_at": datetime.now().isoformat()
+    }
     with SERVER_JOBS_LOCK:
-        ACTIVE_SERVER_JOBS[job_id] = {
-            "job_id": job_id,
-            "device_id": dev_id,
-            "workspace_id": ws_id,
-            "status": "running",
-            "percent": 5,
-            "message": f"Đang khởi tạo tiến trình {provider.upper()}...",
-            "source_url": f"/api/pipeline/job_video/{job_id}/input_video.mp4",
-            "created_at": datetime.now().isoformat()
-        }
+        ACTIVE_SERVER_JOBS[job_id] = job_state_dict
 
     job_cfg_path = os.path.join(TEMP_DIR, f"{job_id}_config.json")
     with open(job_cfg_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
     with open(os.path.join(job_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
+    try:
+        with open(os.path.join(job_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(job_state_dict, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
+    req_relay_url = data.get("relay_url") or data.get("origin") or get_public_relay_url()
     try:
         if provider == "kaggle":
             dispatch_kaggle_t4_worker(job_id, ws_id=ws_id)
         elif provider in ("github", "server_247"):
-            dispatch_github_vps_worker(job_id, ws_id=ws_id)
+            dispatch_github_vps_worker(job_id, relay_url=req_relay_url, ws_id=ws_id)
         else:
             return jsonify({"error": "Provider không hợp lệ"}), 400
 
@@ -6755,7 +6808,9 @@ def api_relay_job_state():
 @app.route("/api/relay/job/<job_id>/worker.py")
 def api_relay_get_worker_py(job_id):
     cfg = load_cloud_config()
-    relay_url = get_public_relay_url()
+    proto = request.headers.get("X-Forwarded-Proto") or ("https" if request.is_secure else "http")
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
+    relay_url = f"{proto}://{host}".rstrip("/") if host else get_public_relay_url()
     code = build_worker_script_for_job(job_id, cfg, relay_url=relay_url)
     return app.response_class(code, mimetype="text/x-python")
 
@@ -6774,6 +6829,14 @@ def api_relay_get_job_video(job_id):
     job_vid = os.path.join(SERVER_JOBS_DIR, job_id, "input_video.mp4")
     if os.path.exists(job_vid):
         return send_from_directory(os.path.join(SERVER_JOBS_DIR, job_id), "input_video.mp4", conditional=True)
+    if os.path.exists(os.path.join(TEMP_DIR, "input_video.mp4")):
+        return send_from_directory(TEMP_DIR, "input_video.mp4", conditional=True)
+    if os.path.exists(WORKSPACES_ROOT):
+        for entry in os.scandir(WORKSPACES_ROOT):
+            if entry.is_dir():
+                cand = os.path.join(entry.path, "input_video.mp4")
+                if os.path.exists(cand) and os.path.getsize(cand) > 100:
+                    return send_from_directory(entry.path, "input_video.mp4", conditional=True)
     return send_from_directory(TEMP_DIR, "input_video.mp4", conditional=True)
 
 @app.route("/api/relay/job/<job_id>/logo")
@@ -8235,7 +8298,7 @@ def render_local_video():
 
 # ==================== MODULE 12: HỆ THỐNG NỀN TẢNG 24/7 & BẢO MẬT BẢN QUYỀN ====================
 
-def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_segments, device_id, target_hw="github", ws_id=None):
+def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_segments, device_id, target_hw="github", ws_id=None, relay_url=None):
     job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
     ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}") if ws_id else TEMP_DIR
@@ -8388,7 +8451,7 @@ def run_server_auto_pipeline_thread(job_id, settings, api_keys, engine, initial_
         if provider == "kaggle":
             dispatch_kaggle_t4_worker(job_id, ws_id=ws_id)
         else:
-            dispatch_github_vps_worker(job_id, ws_id=ws_id)
+            dispatch_github_vps_worker(job_id, relay_url=relay_url, ws_id=ws_id)
 
         update_job(10, f"Đã kết nối thành công với {provider_label}! Đang chờ Worker nhận Video từ Trạm Trung Chuyển...", step="running")
 
@@ -8472,11 +8535,12 @@ def api_pipeline_start_auto():
     api_keys = data.get("apiKeys", [])
     engine = data.get("engine", "hybrid")
     initial_segments = data.get("segments", [])
+    req_relay_url = data.get("relay_url") or data.get("origin") or get_public_relay_url()
 
     job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     Thread(
         target=run_server_auto_pipeline_thread,
-        args=(job_id, settings, api_keys, engine, initial_segments, dev_id, target_hw, ws_id),
+        args=(job_id, settings, api_keys, engine, initial_segments, dev_id, target_hw, ws_id, req_relay_url),
         daemon=True
     ).start()
 
