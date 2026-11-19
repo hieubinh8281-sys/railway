@@ -49,6 +49,8 @@ from nexus_security import (
     extend_license_key,
     delete_license_key,
     add_license_quota,
+    set_license_quota,
+    is_free_trial_key,
     consume_license_quota,
     validate_license,
     create_session_token,
@@ -626,6 +628,188 @@ reset_temp_session()
 # Kích hoạt toàn bộ tính năng trong nexus_addons.py (SmartBlur, DVD Watermark, Logo, CORS, Railway)
 register_nexus_addons(app, TEMP_DIR, update_progress, TUNNEL_INFO)
 
+# ==================== HỆ THỐNG LỊCH SỬ VIDEO ĐÃ LÀM & TỰ ĐỘNG DỌN DẸP 5-7 NGÀY ====================
+HISTORY_RETENTION_DAYS = 7 # Tự động xóa lịch sử và giải phóng video sau 7 ngày (phù hợp GoFile)
+
+def get_workspace_history_path(ws_id):
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+    os.makedirs(ws_dir, exist_ok=True)
+    return os.path.join(ws_dir, "history.json")
+
+def load_workspace_history(ws_id):
+    path = get_workspace_history_path(ws_id)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_workspace_history(ws_id, items):
+    path = get_workspace_history_path(ws_id)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[!] Lỗi lưu history ws_{ws_id}: {e}", flush=True)
+
+def cleanup_expired_history(target_ws_id=None, max_days=7):
+    """
+    Tự động quét và dọn dẹp các video & lịch sử đã quá hạn (5-7 ngày)
+    để giải phóng dung lượng đĩa Railway và đồng bộ thời hạn lưu trữ GoFile.
+    """
+    now_dt = datetime.now()
+    ws_ids = [target_ws_id] if target_ws_id else []
+    if not ws_ids:
+        if os.path.exists(WORKSPACES_ROOT):
+            for d in os.listdir(WORKSPACES_ROOT):
+                if d.startswith("ws_"):
+                    ws_ids.append(d[3:])
+    
+    for wid in ws_ids:
+        hpath = get_workspace_history_path(wid)
+        if not os.path.exists(hpath):
+            continue
+        try:
+            items = load_workspace_history(wid)
+            kept_items = []
+            changed = False
+            for it in items:
+                exp_str = it.get("expires_at")
+                c_str = it.get("created_at")
+                is_expired = False
+                if exp_str:
+                    try:
+                        if now_dt > datetime.fromisoformat(exp_str):
+                            is_expired = True
+                    except Exception:
+                        pass
+                elif c_str:
+                    try:
+                        c_dt = datetime.fromisoformat(c_str)
+                        if (now_dt - c_dt).days >= max_days:
+                            is_expired = True
+                    except Exception:
+                        pass
+                
+                if is_expired:
+                    changed = True
+                    # Xóa file vật lý tương ứng nếu tồn tại để giải phóng ổ cứng
+                    fpath = it.get("file_path")
+                    if fpath and os.path.exists(fpath):
+                        try: os.remove(fpath)
+                        except Exception: pass
+                else:
+                    kept_items.append(it)
+            
+            if changed:
+                save_workspace_history(wid, kept_items)
+        except Exception as e:
+            print(f"[!] Lỗi cleanup history ws_{wid}: {e}", flush=True)
+
+def record_video_history(ws_id, item):
+    """
+    Ghi nhận một video đã hoàn tất vào lịch sử của workspace:
+    """
+    if not ws_id:
+        ws_id = "default"
+    items = load_workspace_history(ws_id)
+    hist_id = item.get("id") or f"hist_{int(time.time())}_{hashlib.md5(str(time.time()).encode()).hexdigest()[:6]}"
+    now_dt = datetime.now()
+    exp_dt = now_dt + timedelta(days=HISTORY_RETENTION_DAYS)
+    
+    fname = item.get("filename") or "output_vietsub.mp4"
+    record = {
+        "id": hist_id,
+        "title": item.get("title") or fname or "Video Vietsub",
+        "filename": fname,
+        "file_path": item.get("file_path", ""),
+        "file_size_mb": round(float(item.get("file_size_mb") or 0.0), 2),
+        "duration_sec": round(float(item.get("duration_sec") or 0.0), 1),
+        "gofile_url": item.get("gofile_url") or "",
+        "download_url": f"/api/workspace/video/download?file={fname}&ws={ws_id}",
+        "preview_url": f"/api/workspace/video/stream?file={fname}&ws={ws_id}",
+        "created_at": item.get("created_at") or now_dt.isoformat(),
+        "expires_at": item.get("expires_at") or exp_dt.isoformat(),
+        "status": "completed"
+    }
+    items = [x for x in items if x.get("id") != hist_id]
+    items.insert(0, record)
+    save_workspace_history(ws_id, items)
+    try:
+        cleanup_expired_history(ws_id, max_days=HISTORY_RETENTION_DAYS)
+    except Exception:
+        pass
+    return record
+
+@app.route("/api/history", methods=["GET"])
+def api_get_history():
+    ws_id = get_workspace_id()
+    try:
+        cleanup_expired_history(ws_id, max_days=HISTORY_RETENTION_DAYS)
+    except Exception:
+        pass
+    items = load_workspace_history(ws_id)
+    now_dt = datetime.now()
+    result = []
+    for it in items:
+        exp_str = it.get("expires_at")
+        days_left = HISTORY_RETENTION_DAYS
+        if exp_str:
+            try:
+                exp_dt = datetime.fromisoformat(exp_str)
+                diff = (exp_dt - now_dt).total_seconds()
+                days_left = max(0, int(diff // 86400))
+            except Exception:
+                pass
+        it_copy = dict(it)
+        it_copy["days_left"] = days_left
+        result.append(it_copy)
+    return jsonify({"status": "ok", "history": result, "retention_days": HISTORY_RETENTION_DAYS})
+
+@app.route("/api/history/<hist_id>", methods=["DELETE"])
+def api_delete_history(hist_id):
+    ws_id = get_workspace_id()
+    items = load_workspace_history(ws_id)
+    new_items = []
+    for it in items:
+        if it.get("id") == hist_id:
+            fpath = it.get("file_path")
+            if fpath and os.path.exists(fpath):
+                try: os.remove(fpath)
+                except Exception: pass
+        else:
+            new_items.append(it)
+    save_workspace_history(ws_id, new_items)
+    return jsonify({"status": "ok"})
+
+@app.route("/api/workspace/video/stream")
+def api_workspace_video_stream():
+    ws_id = request.args.get("ws") or get_workspace_id()
+    fname = request.args.get("file", "output_vietsub.mp4")
+    safe_name = os.path.basename(fname)
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+    fpath = os.path.join(ws_dir, safe_name)
+    if not os.path.exists(fpath):
+        fpath = os.path.join(TEMP_DIR, safe_name)
+    if not os.path.exists(fpath):
+        return jsonify({"error": "Video không tồn tại"}), 404
+    return send_file(fpath, mimetype="video/mp4")
+
+@app.route("/api/workspace/video/download")
+def api_workspace_video_download():
+    ws_id = request.args.get("ws") or get_workspace_id()
+    fname = request.args.get("file", "output_vietsub.mp4")
+    safe_name = os.path.basename(fname)
+    ws_dir = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}")
+    fpath = os.path.join(ws_dir, safe_name)
+    if not os.path.exists(fpath):
+        fpath = os.path.join(TEMP_DIR, safe_name)
+    if not os.path.exists(fpath):
+        return jsonify({"error": "Video không tồn tại"}), 404
+    return send_file(fpath, as_attachment=True, download_name=safe_name)
+
 def get_workspace_cloud_config_path(ws_id=None):
     if not ws_id:
         try:
@@ -900,6 +1084,20 @@ def generate_ass(ass_path, segments, vid_w, vid_h, st, addon_cfg, total_dur):
     outline_w = int(st.get("outlineWidth", 2))
     margin_v = int(st.get("marginV", 28))
 
+    # Chế độ SmartSub: Video ngắn <= 15 phút (900s) tự động dùng Opaque Box (Nền chữ sang trọng bo sát sub gốc)
+    is_short = bool(total_dur and float(total_dur) <= 900.0)
+    smartsub_mode = st.get("smartsubMode", "auto")
+    use_opaque_box = (smartsub_mode == "opaque_box") or (smartsub_mode == "auto" and is_short)
+
+    if use_opaque_box:
+        border_style = 3
+        outline_val = max(3, outline_w)
+        back_colour = "&HD0000000"
+    else:
+        border_style = 1
+        outline_val = outline_w
+        back_colour = "&H80000000"
+
     dvd_style_line = ""
     if addon_cfg.get("dvd_text_enabled"):
         d_font = int(addon_cfg.get("dvd_font_size", 24))
@@ -919,7 +1117,7 @@ PlayResY: {play_res_y}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{ass_font_size},{ass_primary},&H000000FF,{ass_outline},&H80000000,-1,0,0,0,100,100,0,0,1,{outline_w},0,2,25,25,{margin_v},1
+Style: Default,{font_name},{ass_font_size},{ass_primary},&H000000FF,{ass_outline},{back_colour},-1,0,0,0,100,100,0,0,{border_style},{outline_val},0,2,25,25,{margin_v},1
 {dvd_style_line}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1390,22 +1588,61 @@ def run_worker():
         enc_label = "GPU T4 NVENC" if use_nvenc else "Cloud Multi-Core CPU (Tốc độ cao)"
         report_progress(80, f"Đang Render Video bằng {enc_label} ({vid_w}x{vid_h})...", force=True)
 
-        br = st.get("blurRect", {"x":0,"y":0,"w":0,"h":0})
-        bx, by = max(0, int(br.get("x",0))//2*2), max(0, int(br.get("y",0))//2*2)
-        bw = 0 if bx >= vid_w - 4 else min(max(0, int(br.get("w",0))//2*2), (vid_w - bx)//2*2)
-        bh = 0 if by >= vid_h - 4 else min(max(0, int(br.get("h",0))//2*2), (vid_h - by)//2*2)
+        # Multi-area Blur & SmartBlur sâu tự nhiên
+        raw_areas = st.get("blurAreas") or []
+        if not raw_areas and st.get("blurRect"):
+            raw_areas = [st.get("blurRect")]
+
+        is_short = bool(total_dur and float(total_dur) <= 900.0)
+        smartsub_mode = st.get("smartsubMode", "auto")
+        use_opaque_box = (smartsub_mode == "opaque_box") or (smartsub_mode == "auto" and is_short)
+
+        valid_areas = []
+        for rect in raw_areas:
+            bx = max(0, int(rect.get("x", 0)) // 2 * 2)
+            by = max(0, int(rect.get("y", 0)) // 2 * 2)
+            bw = max(0, int(rect.get("w", 0)) // 2 * 2)
+            bh = max(0, int(rect.get("h", 0)) // 2 * 2)
+            if vid_w and vid_h:
+                bw = 0 if bx >= vid_w - 4 else min(bw, (vid_w - bx) // 2 * 2)
+                bh = 0 if by >= vid_h - 4 else min(bh, (vid_h - by) // 2 * 2)
+            # Nếu dùng SmartSub nền chữ cho video ngắn, không blur vùng sub đáy nữa
+            if use_opaque_box and by > (vid_h * 0.6) and bh < (vid_h * 0.35):
+                continue
+            if bw >= 8 and bh >= 8:
+                valid_areas.append({"x": bx, "y": by, "w": bw, "h": bh})
+
         b_op = float(st.get("blurOpacity", 0)) / 100.0
-        b_sig = int(st.get("blurSigma", 14))
+        b_sig = int(st.get("blurSigma", 22))
+        eff_sig = max(10, b_sig if b_sig > 0 else 22)
         b_col = st.get("blurColor", "#000000").lstrip('#')
 
-        if bw >= 8 and bh >= 8:
-            b_steps = [f"crop={bw}:{bh}:{bx}:{by}"]
-            # Kính mờ tự nhiên chuẩn Studio cao cấp (không viền đen, không ám màu)
-            if b_sig > 0: b_steps.append(f"boxblur=luma_radius={b_sig}:luma_power=1")
-            if b_op > 0.02: b_steps.append(f"drawbox=x=0:y=0:w={bw}:h={bh}:color=0x{b_col}@{b_op:.2f}:t=fill")
-            base_vf = f"[0:v]split=2[main][cs];[cs]{','.join(b_steps)}[bl];[main][bl]overlay={bx}:{by}:shortest=1,ass=sub_vi.ass[v_sub]"
-        else:
+        if len(valid_areas) == 0:
             base_vf = "[0:v]ass=sub_vi.ass[v_sub]"
+        elif len(valid_areas) == 1:
+            a = valid_areas[0]
+            b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
+            b_steps.append(f"avgblur=sizeX={eff_sig}:sizeY={eff_sig}:planes=7")
+            b_steps.append(f"boxblur=luma_radius={eff_sig}:luma_power=2:chroma_radius={eff_sig}")
+            if b_op > 0.02: b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{b_col}@{b_op:.2f}:t=fill")
+            base_vf = f"[0:v]split=2[main][cs];[cs]{','.join(b_steps)}[bl];[main][bl]overlay={a['x']}:{a['y']}:shortest=1,ass=sub_vi.ass[v_sub]"
+        else:
+            n_areas = len(valid_areas)
+            splits = "".join([f"[cs{i}]" for i in range(n_areas)])
+            parts = [f"[0:v]split={n_areas+1}[main]{splits}"]
+            for i, a in enumerate(valid_areas):
+                b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
+                b_steps.append(f"avgblur=sizeX={eff_sig}:sizeY={eff_sig}:planes=7")
+                b_steps.append(f"boxblur=luma_radius={eff_sig}:luma_power=2:chroma_radius={eff_sig}")
+                if b_op > 0.02: b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{b_col}@{b_op:.2f}:t=fill")
+                parts.append(f"[cs{i}]{','.join(b_steps)}[bl{i}]")
+            cur_l = "[main]"
+            for i, a in enumerate(valid_areas):
+                nxt_l = f"[tmp{i}]" if i < n_areas - 1 else "[v_bl]"
+                parts.append(f"{cur_l}[bl{i}]overlay={a['x']}:{a['y']}:shortest=1{nxt_l}")
+                cur_l = nxt_l
+            parts.append(f"[v_bl]ass=sub_vi.ass[v_sub]")
+            base_vf = ";".join(parts)
 
         has_valid_logo = bool(addon_cfg.get("logo_enabled") and os.path.exists(logo_path))
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"]
@@ -1971,7 +2208,7 @@ def generate_vtt_file(vtt_path, segments):
                 continue
             f.write(f"{idx}\n{format_vtt_time(seg['start'])} --> {format_vtt_time(seg['end'])}\n{line_text}\n\n")
 
-def generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang="vi"):
+def generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang="vi", use_opaque_box=False):
     play_res_y = 720
     play_res_x = int(round(720 * (vid_w / max(1, vid_h))))
     ass_primary = hex_to_ass_color(text_color, 0)
@@ -1980,6 +2217,15 @@ def generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, te
 
     if target_lang in ("zh", "ja", "ko") and font_name in ("Tahoma", "Impact", "Courier New"):
         font_name = "Arial"
+
+    if use_opaque_box:
+        border_style = 3
+        outline_val = max(3, outline_width)
+        back_colour = "&HD0000000"
+    else:
+        border_style = 1
+        outline_val = outline_width
+        back_colour = "&H80000000"
 
     header = f"""[Script Info]
 Title: Nexus Multi-Lingual Studio
@@ -1992,7 +2238,7 @@ PlayResY: {play_res_y}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{ass_font_size},{ass_primary},&H000000FF,{ass_outline},&H80000000,-1,0,0,0,100,100,0,0,1,{outline_width},0,2,25,25,{margin_v},1
+Style: Default,{font_name},{ass_font_size},{ass_primary},&H000000FF,{ass_outline},{back_colour},-1,0,0,0,100,100,0,0,{border_style},{outline_val},0,2,25,25,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -2045,6 +2291,42 @@ HTML_TEMPLATE = """
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap');
+
+        /* ========== KEYFRAME ANIMATIONS ========== */
+        @keyframes neonPulse {
+            0%, 100% { opacity: 1; filter: brightness(1); }
+            50% { opacity: 0.75; filter: brightness(1.35); }
+        }
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        @keyframes borderGlow {
+            0%, 100% { border-color: var(--accent-border); box-shadow: 0 0 8px var(--accent-glow); }
+            50% { border-color: var(--accent-primary); box-shadow: 0 0 22px var(--accent-glow), 0 0 44px var(--neon-glow); }
+        }
+        @keyframes nebulaFloat {
+            0%, 100% { transform: translateY(0) scale(1); opacity: 0.08; }
+            50% { transform: translateY(-18px) scale(1.06); opacity: 0.14; }
+        }
+        @keyframes gridScroll {
+            0% { background-position: 0 0; }
+            100% { background-position: 0 60px; }
+        }
+        @keyframes glowBreath {
+            0%, 100% { box-shadow: 0 0 6px var(--accent-glow), 0 0 18px transparent; }
+            50% { box-shadow: 0 0 10px var(--accent-glow), 0 0 30px var(--neon-glow); }
+        }
+        @keyframes textGlow {
+            0%, 100% { text-shadow: 0 0 6px var(--accent-glow); }
+            50% { text-shadow: 0 0 14px var(--accent-glow), 0 0 28px var(--neon-glow); }
+        }
+        @keyframes holographicSheen {
+            0% { background-position: -300% 0; }
+            100% { background-position: 300% 0; }
+        }
+
+        /* ========== ROOT THEME VARIABLES ========== */
         :root {
             --accent-primary: #0ea5e9;
             --accent-secondary: #6366f1;
@@ -2052,12 +2334,17 @@ HTML_TEMPLATE = """
             --accent-glow: rgba(14, 165, 233, 0.45);
             --accent-text: #38bdf8;
             --accent-border: rgba(14, 165, 233, 0.4);
-            --bg-deep: #05070f;
-            --panel-bg: rgba(10, 14, 26, 0.94);
-            --card-bg: rgba(14, 20, 36, 0.72);
-            --border-subtle: rgba(255, 255, 255, 0.08);
+            --bg-deep: #030509;
+            --panel-bg: rgba(8, 12, 24, 0.82);
+            --panel-glass: rgba(14, 20, 36, 0.55);
+            --card-bg: rgba(12, 18, 32, 0.6);
+            --border-subtle: rgba(255, 255, 255, 0.07);
             --sub-font-size: 14px;
+            --neon-glow: rgba(14, 165, 233, 0.22);
+            --border-glow: rgba(14, 165, 233, 0.35);
         }
+
+        /* ========== THEME OVERRIDES ========== */
         [data-theme="violet"] {
             --accent-primary: #a855f7;
             --accent-secondary: #8b5cf6;
@@ -2065,6 +2352,9 @@ HTML_TEMPLATE = """
             --accent-glow: rgba(168, 85, 247, 0.45);
             --accent-text: #c084fc;
             --accent-border: rgba(168, 85, 247, 0.45);
+            --neon-glow: rgba(168, 85, 247, 0.22);
+            --border-glow: rgba(168, 85, 247, 0.35);
+            --panel-glass: rgba(22, 12, 36, 0.55);
         }
         [data-theme="emerald"] {
             --accent-primary: #10b981;
@@ -2073,6 +2363,9 @@ HTML_TEMPLATE = """
             --accent-glow: rgba(16, 185, 129, 0.45);
             --accent-text: #34d399;
             --accent-border: rgba(16, 185, 129, 0.45);
+            --neon-glow: rgba(16, 185, 129, 0.22);
+            --border-glow: rgba(16, 185, 129, 0.35);
+            --panel-glass: rgba(8, 24, 18, 0.55);
         }
         [data-theme="amber"] {
             --accent-primary: #f59e0b;
@@ -2081,6 +2374,9 @@ HTML_TEMPLATE = """
             --accent-glow: rgba(245, 158, 11, 0.45);
             --accent-text: #fbbf24;
             --accent-border: rgba(245, 158, 11, 0.45);
+            --neon-glow: rgba(245, 158, 11, 0.22);
+            --border-glow: rgba(245, 158, 11, 0.35);
+            --panel-glass: rgba(28, 18, 8, 0.55);
         }
         [data-theme="crimson"] {
             --accent-primary: #f43f5e;
@@ -2089,6 +2385,9 @@ HTML_TEMPLATE = """
             --accent-glow: rgba(244, 63, 94, 0.45);
             --accent-text: #fb7185;
             --accent-border: rgba(244, 63, 94, 0.45);
+            --neon-glow: rgba(244, 63, 94, 0.22);
+            --border-glow: rgba(244, 63, 94, 0.35);
+            --panel-glass: rgba(32, 10, 14, 0.55);
         }
         [data-theme="obsidian"] {
             --accent-primary: #94a3b8;
@@ -2097,6 +2396,9 @@ HTML_TEMPLATE = """
             --accent-glow: rgba(148, 163, 184, 0.35);
             --accent-text: #cbd5e1;
             --accent-border: rgba(148, 163, 184, 0.4);
+            --neon-glow: rgba(148, 163, 184, 0.18);
+            --border-glow: rgba(148, 163, 184, 0.3);
+            --panel-glass: rgba(16, 18, 22, 0.55);
         }
         [data-theme="cyber"] {
             --accent-primary: #0ea5e9;
@@ -2105,9 +2407,12 @@ HTML_TEMPLATE = """
             --accent-glow: rgba(14, 165, 233, 0.45);
             --accent-text: #38bdf8;
             --accent-border: rgba(14, 165, 233, 0.4);
+            --neon-glow: rgba(14, 165, 233, 0.22);
+            --border-glow: rgba(14, 165, 233, 0.35);
+            --panel-glass: rgba(8, 12, 28, 0.55);
         }
 
-        /* LIVE CSS BINDINGS FOR THEME TRANSFORMATION */
+        /* ========== LIVE CSS BINDINGS FOR THEME TRANSFORMATION ========== */
         [data-theme] .text-sky-400,
         [data-theme] .text-sky-300 {
             color: var(--accent-text) !important;
@@ -2120,64 +2425,294 @@ HTML_TEMPLATE = """
         }
         [data-theme] #btnAutoAll {
             background: var(--accent-gradient) !important;
-            box-shadow: 0 4px 18px var(--accent-glow) !important;
+            box-shadow: 0 4px 18px var(--accent-glow), 0 0 40px var(--neon-glow) !important;
         }
         [data-theme] #progressBar,
         [data-theme] #mobProgressBar {
             background: var(--accent-gradient) !important;
+            animation: neonPulse 2.5s ease-in-out infinite !important;
         }
         [data-theme] .nav-pill.active {
             background: var(--accent-gradient) !important;
             color: #ffffff !important;
-            box-shadow: 0 4px 14px var(--accent-glow) !important;
+            box-shadow: 0 4px 14px var(--accent-glow), 0 0 28px var(--neon-glow) !important;
         }
 
+        /* ========== DEEP SPACE BACKGROUND ========== */
         body {
             background-color: var(--bg-deep);
-            background-image: 
-                radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.08) 0px, transparent 45%),
-                radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.09) 0px, transparent 45%),
-                radial-gradient(at 50% 100%, rgba(14, 165, 233, 0.05) 0px, transparent 50%);
+            background-image:
+                radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.07) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.08) 0px, transparent 50%),
+                radial-gradient(at 50% 100%, rgba(14, 165, 233, 0.04) 0px, transparent 55%),
+                radial-gradient(at 70% 30%, rgba(99, 102, 241, 0.06) 0px, transparent 40%);
             color: #f1f5f9;
             font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
             overflow: hidden;
+            position: relative;
         }
+        /* Animated grid overlay */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+            background-size: 60px 60px;
+            animation: gridScroll 12s linear infinite;
+            pointer-events: none;
+            z-index: 0;
+        }
+        /* Nebula floating orb */
+        body::after {
+            content: '';
+            position: fixed;
+            top: 10%;
+            left: 50%;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+            filter: blur(100px);
+            animation: nebulaFloat 15s ease-in-out infinite;
+            pointer-events: none;
+            z-index: 0;
+            transform: translateX(-50%);
+        }
+
+        /* ========== TYPOGRAPHY ========== */
         .mono { font-family: 'JetBrains Mono', monospace; }
+
+        /* ========== GLASSMORPHISM PANELS ========== */
         .studio-panel {
-            background: var(--panel-bg);
+            background: var(--panel-glass);
             border: 1px solid var(--border-subtle);
-            box-shadow: 0 16px 40px -10px rgba(0, 0, 0, 0.85);
-            backdrop-filter: blur(16px);
+            box-shadow:
+                0 20px 50px -12px rgba(0, 0, 0, 0.9),
+                0 0 1px 0 rgba(255, 255, 255, 0.05),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+            backdrop-filter: blur(20px) saturate(1.4);
+            -webkit-backdrop-filter: blur(20px) saturate(1.4);
+            border-radius: 16px;
+            transition: box-shadow 0.3s ease, border-color 0.3s ease;
+            position: relative;
+            z-index: 1;
         }
+        .studio-panel:hover {
+            border-color: rgba(255, 255, 255, 0.1);
+            box-shadow:
+                0 24px 60px -12px rgba(0, 0, 0, 0.9),
+                0 0 1px 0 rgba(255, 255, 255, 0.07),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+        }
+
         .studio-card {
             background: var(--card-bg);
             border: 1px solid var(--border-subtle);
-            backdrop-filter: blur(10px);
+            backdrop-filter: blur(12px) saturate(1.2);
+            -webkit-backdrop-filter: blur(12px) saturate(1.2);
+            border-radius: 14px;
+            box-shadow:
+                0 8px 24px -6px rgba(0, 0, 0, 0.6),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.03);
+            transition: all 0.3s ease;
+            position: relative;
+            z-index: 1;
+        }
+        .studio-card:hover {
+            border-color: var(--border-glow);
+            box-shadow:
+                0 8px 24px -6px rgba(0, 0, 0, 0.6),
+                0 0 16px var(--neon-glow),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+        }
+
+        /* ========== NAVIGATION PILLS ========== */
+        .nav-pill {
+            transition: all 0.3s ease;
+            border-radius: 12px;
+            position: relative;
+            z-index: 1;
+        }
+        .nav-pill:hover {
+            background: rgba(255, 255, 255, 0.05);
+            transform: translateY(-1px);
         }
         .nav-pill.active {
             background: var(--accent-gradient);
             color: #ffffff;
-            box-shadow: 0 4px 14px var(--accent-glow);
+            box-shadow: 0 4px 14px var(--accent-glow), 0 0 28px var(--neon-glow);
+            animation: glowBreath 3s ease-in-out infinite;
         }
+
+        /* ========== SUBTITLE TIMELINE ========== */
         .sub-timeline-text { font-size: var(--sub-font-size); }
+
+        /* ========== COLOR INPUT ========== */
         input[type="color"] { -webkit-appearance: none; border: none; padding: 0; cursor: pointer; background: transparent; }
         input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
-        input[type="color"]::-webkit-color-swatch { border: 1px solid #475569; border-radius: 6px; }
-        ::-webkit-scrollbar { width: 5px; height: 5px; }
-        ::-webkit-scrollbar-track { background: #05070d; }
-        ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: #334155; }
-        video::cue { background: rgba(0,0,0,0.7); color: #e1ff00; font-weight: bold; }
+        input[type="color"]::-webkit-color-swatch { border: 1px solid #475569; border-radius: 8px; }
+
+        /* ========== CUSTOM NEON SCROLLBARS ========== */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(5, 7, 13, 0.6); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, var(--accent-primary), var(--accent-secondary));
+            border-radius: 3px;
+            box-shadow: 0 0 6px var(--neon-glow);
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(180deg, var(--accent-text), var(--accent-primary));
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+
+        /* ========== VIDEO CUES ========== */
+        video::cue { background: rgba(0,0,0,0.75); color: #e1ff00; font-weight: bold; text-shadow: 0 0 8px rgba(225, 255, 0, 0.5); }
+
+        /* ========== GLOBAL TRANSITIONS & INTERACTIVITY ========== */
+        button, a, select, input, .nav-pill, .studio-card {
+            transition: all 0.3s ease;
+        }
+        button:hover, select:hover {
+            filter: brightness(1.1);
+        }
+        button:active {
+            transform: scale(0.97);
+        }
+
+        /* ========== NEON GLOW ON INTERACTIVE ELEMENTS ========== */
+        button:focus-visible,
+        select:focus-visible,
+        input:focus-visible {
+            outline: 2px solid var(--accent-primary);
+            outline-offset: 2px;
+            box-shadow: 0 0 12px var(--accent-glow), 0 0 30px var(--neon-glow);
+        }
+
+        /* ========== ANIMATED GRADIENT BORDERS ON FOCUSED INPUTS ========== */
+        input[type="text"]:focus,
+        input[type="number"]:focus,
+        input[type="password"]:focus,
+        select:focus,
+        textarea:focus {
+            border-color: var(--accent-primary) !important;
+            box-shadow: 0 0 0 2px var(--neon-glow), 0 0 20px var(--neon-glow);
+            animation: borderGlow 2s ease-in-out infinite;
+        }
+
+        /* ========== CUSTOM RANGE INPUT SLIDERS ========== */
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 6px;
+            background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.12));
+            border-radius: 3px;
+            outline: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--accent-gradient);
+            box-shadow: 0 0 8px var(--accent-glow), 0 2px 6px rgba(0,0,0,0.5);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 0 16px var(--accent-glow), 0 0 32px var(--neon-glow);
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: none;
+            background: var(--accent-gradient);
+            box-shadow: 0 0 8px var(--accent-glow), 0 2px 6px rgba(0,0,0,0.5);
+            cursor: pointer;
+        }
+        input[type="range"]:hover {
+            background: linear-gradient(90deg, var(--neon-glow), rgba(255,255,255,0.12));
+        }
+
+        /* ========== TEXT GLOW EFFECTS ========== */
+        .text-sky-400, .text-sky-300 {
+            text-shadow: 0 0 8px var(--neon-glow);
+        }
+
+        /* ========== PROGRESS BAR GLOW ========== */
+        #progressBar, #mobProgressBar {
+            animation: neonPulse 2.5s ease-in-out infinite;
+            box-shadow: 0 0 10px var(--accent-glow);
+            border-radius: 999px;
+        }
+
+        /* ========== HOLOGRAPHIC HEADER SHIMMER ========== */
+        .holo-header {
+            position: relative;
+            overflow: hidden;
+        }
+        .holo-header::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(
+                105deg,
+                transparent 20%,
+                rgba(255, 255, 255, 0.03) 30%,
+                rgba(255, 255, 255, 0.06) 40%,
+                rgba(255, 255, 255, 0.03) 50%,
+                transparent 60%
+            );
+            background-size: 200% 100%;
+            animation: holographicSheen 8s ease-in-out infinite;
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        /* ========== ENHANCED BADGES ========== */
+        .badge-glow {
+            animation: glowBreath 3s ease-in-out infinite;
+        }
+
+        /* ========== TOAST NOTIFICATION GLOW ========== */
+        .toast-glow {
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 20px var(--accent-glow), 0 0 40px var(--neon-glow) !important;
+            border-color: var(--accent-border) !important;
+            animation: borderGlow 2s ease-in-out infinite;
+        }
+
+        /* ========== MOBILE PROGRESS HUD GLOW ========== */
+        .mobile-hud-glow {
+            box-shadow: 0 10px 40px rgba(0,0,0,0.7), 0 0 24px var(--accent-glow), 0 0 50px var(--neon-glow) !important;
+            animation: glowBreath 3s ease-in-out infinite;
+        }
+
+        /* ========== ENHANCED SELECT DROPDOWNS ========== */
+        select {
+            border-radius: 12px !important;
+        }
 
         /* ================= MOBILE RESPONSIVE OVERRIDES ================= */
         body.is-mobile {
             overflow-y: auto !important;
             height: auto !important;
             min-height: 100vh;
+            min-height: 100dvh;
         }
         body.is-mobile #viewMainStudio {
             height: auto !important;
             min-height: 100vh;
+            min-height: 100dvh;
             overflow-y: visible !important;
             padding-bottom: 85px; /* Chừa khoảng trống cho Bottom Action Bar trên Mobile */
         }
@@ -2206,11 +2741,26 @@ HTML_TEMPLATE = """
         body.is-mobile .monitor-box {
             min-height: 200px !important;
             max-height: 320px !important;
+            border-radius: 16px !important;
         }
         body.is-mobile .sub-table-container {
             max-height: none !important;
             min-height: 250px !important;
             overflow-y: visible !important;
+        }
+        body.is-mobile .studio-panel {
+            border-radius: 16px !important;
+        }
+        body.is-mobile .studio-card {
+            border-radius: 14px !important;
+        }
+        body.is-mobile button {
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
+        /* Smooth momentum scrolling on mobile */
+        body.is-mobile * {
+            -webkit-overflow-scrolling: touch;
         }
 
         /* MOBILE SEGMENTED VIEW CONTROLLER: GỌN GÀNG, KHÔNG BỊ TRÀN KÉO DÀI */
@@ -2443,6 +2993,10 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-palette text-purple-400"></i> Cài Đặt
                 </button>
 
+                <button onclick="openHistoryModal()" class="px-2.5 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition" title="Xem lịch sử video đã hoàn thành (Lưu trữ 5-7 ngày)">
+                    <i class="fa-solid fa-clock-rotate-left text-amber-400"></i> Lịch Sử
+                </button>
+
                 <button onclick="logoutClient()" class="px-2.5 py-2 rounded-xl bg-white/[0.04] hover:bg-rose-950/60 hover:text-rose-300 border border-white/[0.08] text-slate-400 text-xs font-semibold flex items-center gap-1.5 transition" title="Đổi Key hoặc Đăng xuất">
                     <i class="fa-solid fa-arrow-right-from-bracket"></i> Đổi Key
                 </button>
@@ -2469,6 +3023,9 @@ HTML_TEMPLATE = """
             </button>
             <button onclick="setMobileActiveView('subs')" id="mobNav_subs" class="flex-1 py-2 rounded-xl flex items-center justify-center gap-1.5 transition text-slate-400 hover:text-white">
                 <i class="fa-solid fa-table-list"></i> <span>3. Phụ Đề</span>
+            </button>
+            <button onclick="openHistoryModal()" class="px-3 py-2 rounded-xl flex items-center justify-center gap-1 transition text-amber-400 bg-amber-500/10 border border-amber-500/20 hover:bg-amber-500/20" title="Xem lịch sử video">
+                <i class="fa-solid fa-clock-rotate-left"></i>
             </button>
         </div>
 
@@ -2723,15 +3280,46 @@ HTML_TEMPLATE = """
 
                     <div class="studio-card rounded-xl p-3.5 space-y-3">
                         <div class="flex items-center justify-between">
-                            <span class="text-xs font-bold text-amber-400 uppercase"><i class="fa-solid fa-vector-square mr-1.5"></i>Vùng Che Mờ & Quét OCR</span>
-                            <button onclick="clearBlurBox()" class="text-[11px] text-rose-400 hover:underline"><i class="fa-solid fa-eraser mr-1"></i>Xóa vùng</button>
+                            <span class="text-xs font-bold text-amber-400 uppercase"><i class="fa-solid fa-vector-square mr-1.5"></i>Vùng Che Mờ & Quét OCR (Đa Vùng)</span>
+                            <div class="flex items-center gap-1.5">
+                                <button onclick="addCurrentBlurArea()" class="text-[11px] px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 hover:bg-sky-500/30 font-bold transition" title="Lưu vùng đang vẽ vào danh sách đa vùng"><i class="fa-solid fa-plus mr-0.5"></i>Thêm Vùng</button>
+                                <button onclick="clearBlurBox()" class="text-[11px] text-rose-400 hover:underline"><i class="fa-solid fa-eraser mr-0.5"></i>Xóa</button>
+                            </div>
                         </div>
+
+                        <!-- CHẾ ĐỘ SMARTSUB: NỀN CHỮ HOẶC KÍNH MỜ -->
+                        <div class="p-2.5 rounded-xl bg-slate-950 border border-sky-500/30 space-y-1.5">
+                            <div class="flex items-center justify-between">
+                                <label class="text-[11px] text-sky-300 font-bold flex items-center gap-1">
+                                    <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i> SmartSub Tự Động:
+                                </label>
+                                <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">Shorts & Long</span>
+                            </div>
+                            <select id="smartsubMode" onchange="drawOverlayOnCanvas()" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-sky-200 outline-none">
+                                <option value="auto" selected>✨ Tự động (Video ≤15p: Nền chữ bo sub gốc; >15p: Kính mờ SmartBlur)</option>
+                                <option value="opaque_box">🔳 Luôn dùng Nền Chữ Opaque Box (Che sub gốc, không cần blur)</option>
+                                <option value="blur_strip">🌫️ Luôn dùng Kính Mờ SmartBlur</option>
+                            </select>
+                            <p class="text-[10px] text-slate-400 leading-tight">Video ngắn Shorts/TikTok: AI tự quét và đặt phụ đề có hộp nền đen mờ 80% che kín sub gốc không cần blur dải.</p>
+                        </div>
+
+                        <!-- TỌA ĐỘ VÙNG ĐANG CHỌN -->
                         <div class="grid grid-cols-4 gap-1.5 text-center text-xs mono">
                             <div class="bg-slate-950 p-1.5 rounded border border-slate-800"><span class="text-slate-500 block text-[10px]">X</span><span id="boxX">0</span></div>
                             <div class="bg-slate-950 p-1.5 rounded border border-slate-800"><span class="text-slate-500 block text-[10px]">Y</span><span id="boxY">0</span></div>
                             <div class="bg-slate-950 p-1.5 rounded border border-slate-800"><span class="text-slate-500 block text-[10px]">Rộng</span><span id="boxW">0</span></div>
                             <div class="bg-slate-950 p-1.5 rounded border border-slate-800"><span class="text-slate-500 block text-[10px]">Cao</span><span id="boxH">0</span></div>
                         </div>
+
+                        <!-- DANH SÁCH CÁC VÙNG CHE MỜ (MULTI-AREA BLUR) -->
+                        <div id="blurAreasContainer" class="hidden space-y-1.5 pt-1 border-t border-slate-800/80">
+                            <div class="flex items-center justify-between text-[11px]">
+                                <span class="font-bold text-sky-400"><i class="fa-solid fa-shapes mr-1"></i>Các vùng che mờ đã vẽ:</span>
+                                <button onclick="clearAllBlurAreas()" class="text-rose-400 hover:underline text-[10px]">Xóa hết tất cả</button>
+                            </div>
+                            <div id="blurAreasList" class="space-y-1 max-h-24 overflow-y-auto"></div>
+                        </div>
+
                         <div>
                             <div class="flex justify-between text-xs">
                                 <span class="text-slate-300">Độ đậm màu dải che mờ (Opacity)</span>
@@ -2741,10 +3329,10 @@ HTML_TEMPLATE = """
                         </div>
                         <div>
                             <div class="flex justify-between text-xs">
-                                <span class="text-slate-300">Độ nhòe kính mờ (Blur Sigma)</span>
-                                <span id="blurSigmaLabel" class="text-amber-400 font-bold">14 (Mịn Tự Nhiên)</span>
+                                <span class="text-slate-300">Độ nhòe kính mờ sâu (Blur Sigma)</span>
+                                <span id="blurSigmaLabel" class="text-amber-400 font-bold">22 (Mờ Sâu Tự Nhiên)</span>
                             </div>
-                            <input type="range" id="blurSigma" min="0" max="40" value="14" oninput="document.getElementById('blurSigmaLabel').innerText=this.value+(this.value>=12?' (Mịn Tự Nhiên)':''); drawOverlayOnCanvas();" class="w-full mt-1 accent-amber-500 cursor-pointer"/>
+                            <input type="range" id="blurSigma" min="0" max="50" value="22" oninput="document.getElementById('blurSigmaLabel').innerText=this.value+(this.value>=18?' (Mờ Sâu Tự Nhiên)':''); drawOverlayOnCanvas();" class="w-full mt-1 accent-amber-500 cursor-pointer"/>
                         </div>
                         <div class="flex items-center justify-between pt-1">
                             <span class="text-xs text-slate-300">Màu nền dải che mờ (chỉ khi Opacity > 0%)</span>
@@ -3001,6 +3589,42 @@ HTML_TEMPLATE = """
         </section>
     </main>
     </div> <!-- END viewMainStudio -->
+
+    <!-- ==================== MODAL LỊCH SỬ VIDEO ĐÃ LÀM (LƯU TRỮ 5-7 NGÀY) ==================== -->
+    <div id="historyModal" class="fixed inset-0 bg-black/85 backdrop-blur-md z-50 hidden items-center justify-center p-3 sm:p-4">
+        <div class="studio-panel rounded-3xl max-w-2xl w-full p-5 sm:p-6 space-y-4 max-h-[90vh] overflow-y-auto border border-amber-500/30 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-white/[0.08] pb-3">
+                <div>
+                    <h3 class="text-sm font-black text-white flex items-center gap-2">
+                        <i class="fa-solid fa-clock-rotate-left text-amber-400"></i> Lịch Sử Video Đã Làm
+                    </h3>
+                    <p class="text-[11px] text-slate-400 mt-0.5">Tự động dọn dẹp sau 5 - 7 ngày để chống tràn ổ cứng và phù hợp thời hạn GoFile</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="loadHistoryList()" class="px-2.5 py-1.5 rounded-lg bg-slate-800 text-sky-400 hover:text-white text-xs font-bold transition flex items-center gap-1">
+                        <i class="fa-solid fa-rotate"></i> Làm mới
+                    </button>
+                    <button onclick="closeHistoryModal()" class="text-slate-400 hover:text-white transition px-2 py-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+                </div>
+            </div>
+
+            <!-- DANH SÁCH LỊCH SỬ VIDEO -->
+            <div id="historyListContainer" class="space-y-2">
+                <div class="text-center py-8 text-xs text-slate-500">Đang tải lịch sử video...</div>
+            </div>
+
+            <!-- PREVIEW VIDEO TRỰC TIẾP TRONG MODAL -->
+            <div id="historyVideoPlayerBox" class="hidden pt-3 border-t border-slate-800 space-y-2">
+                <div class="flex items-center justify-between">
+                    <span id="historyPlayerTitle" class="text-xs font-bold text-sky-400 truncate"></span>
+                    <button onclick="closeHistoryPlayer()" class="text-xs text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i> Thu gọn</button>
+                </div>
+                <div class="aspect-video bg-black rounded-xl overflow-hidden border border-slate-800 flex items-center justify-center">
+                    <video id="historyVideoElement" controls class="w-full h-full object-contain"></video>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- ==================== MODAL CÀI ĐẶT GIAO DIỆN & TÙY BIẾN MÀU SẮC ==================== -->
     <div id="settingsModal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-50 hidden items-center justify-center p-3 sm:p-4">
@@ -3355,6 +3979,7 @@ HTML_TEMPLATE = """
 
         let segments = [];
         let blurRect = { x: 0, y: 0, w: 0, h: 0 };
+        let blurAreas = []; // Danh sách nhiều vùng làm mờ (Multi-area blur: che sub, logo, watermark...)
         let extractMode = "whisper";
         let currentProjectId = null;
         let currentProjectName = "Phiên tạm";
@@ -3934,27 +4559,93 @@ HTML_TEMPLATE = """
             return `rgba(${r}, ${g}, ${b}, ${alpha})`;
         }
 
+        function addCurrentBlurArea() {
+            if (blurRect.w < 8 || blurRect.h < 8) {
+                alert("Vui lòng dùng chuột kéo vẽ một vùng che mờ trên màn hình video trước khi bấm Thêm!");
+                return;
+            }
+            blurAreas.push({ ...blurRect, id: Date.now() });
+            renderBlurAreasList();
+            drawOverlayOnCanvas();
+        }
+
+        function removeBlurArea(index) {
+            blurAreas.splice(index, 1);
+            renderBlurAreasList();
+            drawOverlayOnCanvas();
+        }
+
+        function clearAllBlurAreas() {
+            blurAreas = [];
+            blurRect = { x: 0, y: 0, w: 0, h: 0 };
+            renderBlurAreasList();
+            updateBoxLabels();
+            drawOverlayOnCanvas();
+        }
+
+        function renderBlurAreasList() {
+            const container = document.getElementById('blurAreasContainer');
+            const list = document.getElementById('blurAreasList');
+            if (!container || !list) return;
+            if (blurAreas.length === 0) {
+                container.classList.add('hidden');
+                list.innerHTML = '';
+                return;
+            }
+            container.classList.remove('hidden');
+            list.innerHTML = blurAreas.map((a, idx) => `
+                <div class="flex items-center justify-between bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] mono">
+                    <span class="text-sky-300 font-bold">#${idx + 1} (${a.w}x${a.h} tại X:${a.x}, Y:${a.y})</span>
+                    <button onclick="removeBlurArea(${idx})" class="text-rose-400 hover:text-white px-1"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+            `).join('');
+        }
+
         function drawOverlayOnCanvas() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (!video.videoWidth || !canvas.height) return;
 
             const scaleX = canvas.width / video.videoWidth;
             const scaleY = canvas.height / video.videoHeight;
+            const opacity = parseInt(document.getElementById('blurOpacity').value || 0) / 100.0;
+            const blurColor = document.getElementById('blurColor').value || '#000000';
 
+            // 1. Vẽ các vùng trong danh sách Đa Vùng (blurAreas)
+            blurAreas.forEach((area, i) => {
+                const ax = area.x * scaleX;
+                const ay = area.y * scaleY;
+                const aw = area.w * scaleX;
+                const ah = area.h * scaleY;
+                if (opacity > 0.02) {
+                    ctx.fillStyle = hexToRgba(blurColor, opacity);
+                    ctx.fillRect(ax, ay, aw, ah);
+                } else {
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+                    ctx.fillRect(ax, ay, aw, ah);
+                }
+                ctx.strokeStyle = '#a855f7';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 2]);
+                ctx.strokeRect(ax, ay, aw, ah);
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(ax + 2, ay + 2, 70, 15);
+                ctx.fillStyle = '#d8b4fe';
+                ctx.font = 'bold 9px sans-serif';
+                ctx.fillText(`Vùng #${i+1}`, ax + 5, ay + 13);
+            });
+
+            // 2. Vẽ vùng đang kéo chuột hiện tại (blurRect)
             if (blurRect.w > 0 && blurRect.h > 0) {
                 const dx = blurRect.x * scaleX;
                 const dy = blurRect.y * scaleY;
                 const dw = blurRect.w * scaleX;
                 const dh = blurRect.h * scaleY;
 
-                const opacity = parseInt(document.getElementById('blurOpacity').value || 0) / 100.0;
-                const blurColor = document.getElementById('blurColor').value || '#000000';
-
                 if (opacity > 0.02) {
                     ctx.fillStyle = hexToRgba(blurColor, opacity);
                     ctx.fillRect(dx, dy, dw, dh);
                 } else {
-                    // Mặc định Kính Mờ Tự Nhiên: trong suốt không màu, giữ nguyên nền video
                     ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
                     ctx.fillRect(dx, dy, dw, dh);
                 }
@@ -3964,14 +4655,14 @@ HTML_TEMPLATE = """
                 ctx.strokeRect(dx, dy, dw, dh);
                 ctx.setLineDash([]);
 
-                // Nhãn chỉ dẫn chế độ kính mờ
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-                ctx.fillRect(dx + 3, dy + 3, 136, 17);
+                ctx.fillRect(dx + 3, dy + 3, 140, 17);
                 ctx.fillStyle = '#fef08a';
                 ctx.font = 'bold 9px sans-serif';
                 ctx.fillText(opacity <= 0.02 ? '✨ Kính Mờ Tự Nhiên' : `Mờ Tint ${Math.round(opacity*100)}%`, dx + 7, dy + 15);
             }
 
+            // 3. Xem trước phụ đề (Hỗ trợ SmartSub Opaque Box nền chữ đen mờ 80% cho video <= 15p)
             const assScale = canvas.height / 720.0;
             const curTime = video.currentTime;
             let activeSub = segments.find(s => curTime >= s.start && curTime <= s.end);
@@ -3996,7 +4687,25 @@ HTML_TEMPLATE = """
             const tx = canvas.width / 2;
             const ty = canvas.height - drawMarginV;
 
-            if (outlineWidth > 0) {
+            // Kiểm tra xem có đang kích hoạt SmartSub Opaque Box nền chữ không
+            const isShortVideo = Boolean(video.duration && video.duration <= 900);
+            const smMode = document.getElementById('smartsubMode') ? document.getElementById('smartsubMode').value : 'auto';
+            const useOpaqueBox = (smMode === 'opaque_box') || (smMode === 'auto' && isShortVideo);
+
+            if (useOpaqueBox && previewText) {
+                // Hiển thị hộp nền chữ Opaque Box bo sát chữ (BorderStyle: 3)
+                const textMetrics = ctx.measureText(previewText);
+                const tw = textMetrics.width;
+                const th = drawFontSize * 1.25;
+                const padX = 10 * assScale;
+                const padY = 4 * assScale;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.82)'; // Nền đen trong suốt 82% sang trọng
+                ctx.beginPath();
+                ctx.roundRect(tx - (tw / 2) - padX, ty - th - padY, tw + (padX * 2), th + (padY * 2), 6 * assScale);
+                ctx.fill();
+            }
+
+            if (outlineWidth > 0 && !useOpaqueBox) {
                 ctx.strokeStyle = outlineColor;
                 ctx.lineWidth = Math.max(1, outlineWidth * 2 * assScale);
                 ctx.lineJoin = 'round';
@@ -4027,6 +4736,8 @@ HTML_TEMPLATE = """
             const srcLang = document.getElementById('whisperSourceLang') ? document.getElementById('whisperSourceLang').value : 'auto';
             const wModel = document.getElementById('whisperModel') ? document.getElementById('whisperModel').value : 'base';
             const wDevice = document.getElementById('whisperDevice') ? document.getElementById('whisperDevice').value : 'auto';
+            const smartsubMode = document.getElementById('smartsubMode') ? document.getElementById('smartsubMode').value : 'auto';
+            const allAreas = blurAreas.length > 0 ? blurAreas : (blurRect.w > 0 ? [blurRect] : []);
             return {
                 extractMode,
                 translationEngine: transEngine,
@@ -4037,8 +4748,10 @@ HTML_TEMPLATE = """
                 targetLangLabel: lInfo.lang_label,
                 googleLangCode: lInfo.google_code,
                 blurRect,
+                blurAreas: allAreas,
+                smartsubMode: smartsubMode,
                 blurOpacity: parseInt(document.getElementById('blurOpacity').value || 0),
-                blurSigma: parseInt(document.getElementById('blurSigma').value || 14),
+                blurSigma: parseInt(document.getElementById('blurSigma').value || 22),
                 blurColor: document.getElementById('blurColor').value || '#000000',
                 fontName: document.getElementById('fontName').value || 'Arial',
                 fontSize: parseInt(document.getElementById('fontSize').value || 22),
@@ -4927,6 +5640,115 @@ HTML_TEMPLATE = """
         function closeSettingsModal() {
             const m = document.getElementById('settingsModal');
             if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+        }
+
+        // ==================== QUẢN LÝ LỊCH SỬ VIDEO ĐÃ LÀM (5-7 NGÀY) ====================
+        function openHistoryModal() {
+            const m = document.getElementById('historyModal');
+            if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+            loadHistoryList();
+        }
+
+        function closeHistoryModal() {
+            const m = document.getElementById('historyModal');
+            if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+            closeHistoryPlayer();
+        }
+
+        async function loadHistoryList() {
+            const container = document.getElementById('historyListContainer');
+            if (!container) return;
+            container.innerHTML = `<div class="text-center py-8 text-xs text-slate-500"><i class="fa-solid fa-spinner fa-spin mr-1.5 text-sky-400"></i> Đang tải danh sách lịch sử video...</div>`;
+            try {
+                const res = await fetch('/api/history');
+                const data = await res.json();
+                const history = data.history || [];
+                if (history.length === 0) {
+                    container.innerHTML = `
+                        <div class="text-center py-10 space-y-2 border border-dashed border-slate-800 rounded-2xl p-6 bg-slate-950/40">
+                            <i class="fa-solid fa-film text-2xl text-slate-600"></i>
+                            <p class="text-xs text-slate-400 font-semibold">Chưa có video nào trong lịch sử.</p>
+                            <p class="text-[11px] text-slate-500">Các video render hoàn tất (cả Cloud 24/7 và Local) sẽ tự động lưu lại ở đây trong 5 - 7 ngày.</p>
+                        </div>`;
+                    return;
+                }
+
+                container.innerHTML = history.map(item => {
+                    const daysLeft = item.days_left !== undefined ? item.days_left : 7;
+                    const expBadge = daysLeft <= 1 
+                        ? `<span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold text-[10px] animate-pulse">Hết hạn trong hôm nay</span>`
+                        : `<span class="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 font-bold text-[10px]">Còn ${daysLeft} ngày lưu</span>`;
+                    
+                    const gofileBtn = item.gofile_url 
+                        ? `<a href="${item.gofile_url}" target="_blank" class="px-2.5 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/30 text-sky-300 text-xs font-bold transition flex items-center gap-1"><i class="fa-solid fa-cloud-arrow-down"></i> GoFile</a>`
+                        : '';
+
+                    const dateStr = item.created_at ? new Date(item.created_at).toLocaleString('vi-VN') : 'Gần đây';
+
+                    return `
+                    <div class="p-3.5 rounded-2xl bg-slate-950/90 border border-slate-800/80 hover:border-sky-500/40 space-y-2 transition shadow-md">
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="font-bold text-xs text-white truncate flex items-center gap-2">
+                                <i class="fa-solid fa-circle-check text-emerald-400"></i> ${item.title}
+                            </div>
+                            ${expBadge}
+                        </div>
+                        <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+                            <div class="flex items-center gap-3">
+                                <span><i class="fa-regular fa-clock mr-1 text-slate-500"></i>${dateStr}</span>
+                                <span><i class="fa-solid fa-hard-drive mr-1 text-slate-500"></i>${item.file_size_mb || 0} MB</span>
+                            </div>
+                            <div class="flex items-center gap-1.5">
+                                <button onclick="playHistoryVideo('${item.preview_url}', '${item.title.replace(/'/g, "\\'")}')" class="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 text-xs font-bold transition flex items-center gap-1">
+                                    <i class="fa-solid fa-play"></i> Xem
+                                </button>
+                                <a href="${item.download_url}" download class="px-2.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/30 text-indigo-300 text-xs font-bold transition flex items-center gap-1">
+                                    <i class="fa-solid fa-download"></i> Tải về
+                                </a>
+                                ${gofileBtn}
+                                <button onclick="deleteHistoryItem('${item.id}')" title="Xóa video này" class="px-2 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/25 text-rose-400 text-xs transition">
+                                    <i class="fa-solid fa-trash-can"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                container.innerHTML = `<div class="text-center py-6 text-xs text-rose-400">Lỗi nạp lịch sử: ${e}</div>`;
+            }
+        }
+
+        function playHistoryVideo(url, title) {
+            const box = document.getElementById('historyVideoPlayerBox');
+            const titleEl = document.getElementById('historyPlayerTitle');
+            const videoEl = document.getElementById('historyVideoElement');
+            if (!box || !videoEl) return;
+            titleEl.innerText = title || "Video Thành Phẩm";
+            videoEl.src = url;
+            box.classList.remove('hidden');
+            videoEl.load();
+            videoEl.play().catch(() => {});
+            box.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function closeHistoryPlayer() {
+            const box = document.getElementById('historyVideoPlayerBox');
+            const videoEl = document.getElementById('historyVideoElement');
+            if (videoEl) {
+                videoEl.pause();
+                videoEl.src = '';
+            }
+            if (box) box.classList.add('hidden');
+        }
+
+        async function deleteHistoryItem(id) {
+            if (!confirm("Bạn có chắc chắn muốn xóa video này khỏi lịch sử và giải phóng dung lượng đĩa không?")) return;
+            try {
+                await fetch('/api/history/' + id, { method: 'DELETE' });
+                loadHistoryList();
+            } catch (e) {
+                alert("Lỗi xóa: " + e);
+            }
         }
 
         function updateSettingsKeyCount() {
@@ -6025,6 +6847,22 @@ def api_relay_complete_transcribe(job_id):
         except Exception:
             pass
 
+    # Ghi nhận vào Lịch Sử Video của Workspace (Lưu trữ 5-7 ngày)
+    if ws_id:
+        try:
+            ws_vid_path = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}", "output_vietsub.mp4")
+            sz_mb = round(os.path.getsize(ws_vid_path) / (1024 * 1024), 2) if os.path.exists(ws_vid_path) else 0.0
+            record_video_history(ws_id, {
+                "id": f"hist_{job_id}",
+                "title": f"Video Vietsub Cloud #{job_id[:8]}",
+                "filename": "output_vietsub.mp4",
+                "file_path": ws_vid_path,
+                "file_size_mb": sz_mb,
+                "gofile_url": gf_url or dir_url or ""
+            })
+        except Exception as e_hist:
+            print(f"[!] Lỗi ghi history video: {e_hist}", flush=True)
+
     return jsonify({"status": "ok"})
 
 @app.route("/api/relay/upload_chunk/<job_id>", methods=["POST"])
@@ -6118,6 +6956,22 @@ def api_relay_upload_chunk(job_id):
             except Exception:
                 pass
 
+        # Ghi nhận vào Lịch Sử Video của Workspace (Lưu trữ 5-7 ngày)
+        if ws_id:
+            try:
+                ws_vid_path = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}", "output_vietsub.mp4")
+                sz_mb = round(os.path.getsize(ws_vid_path) / (1024 * 1024), 2) if os.path.exists(ws_vid_path) else 0.0
+                record_video_history(ws_id, {
+                    "id": f"hist_{job_id}",
+                    "title": f"Video Vietsub Cloud #{job_id[:8]}",
+                    "filename": "output_vietsub.mp4",
+                    "file_path": ws_vid_path,
+                    "file_size_mb": sz_mb,
+                    "gofile_url": gf_url or dir_url or ""
+                })
+            except Exception as e_hist:
+                print(f"[!] Lỗi ghi history video: {e_hist}", flush=True)
+
         return jsonify({"status": "completed", "assembled": True})
 
     return jsonify({"status": "chunk_received", "received": len(parts), "total": total_chunks})
@@ -6200,6 +7054,22 @@ def api_relay_upload_result(job_id):
         except Exception:
             pass
 
+    # Ghi nhận vào Lịch Sử Video của Workspace (Lưu trữ 5-7 ngày)
+    if ws_id:
+        try:
+            ws_vid_path = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}", "output_vietsub.mp4")
+            sz_mb = round(os.path.getsize(ws_vid_path) / (1024 * 1024), 2) if os.path.exists(ws_vid_path) else 0.0
+            record_video_history(ws_id, {
+                "id": f"hist_{job_id}",
+                "title": f"Video Vietsub Cloud #{job_id[:8]}",
+                "filename": "output_vietsub.mp4",
+                "file_path": ws_vid_path,
+                "file_size_mb": sz_mb,
+                "gofile_url": gf_url or dir_url or ""
+            })
+        except Exception as e_hist:
+            print(f"[!] Lỗi ghi history video: {e_hist}", flush=True)
+
     return jsonify({"status": "ok"})
 
 @app.route("/api/relay/fail/<job_id>", methods=["POST"])
@@ -6223,6 +7093,22 @@ def api_relay_fail(job_id):
                 json.dump(job, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    # Ghi nhận vào Lịch Sử Video của Workspace (Lưu trữ 5-7 ngày)
+    if ws_id:
+        try:
+            ws_vid_path = os.path.join(WORKSPACES_ROOT, f"ws_{ws_id}", "output_vietsub.mp4")
+            sz_mb = round(os.path.getsize(ws_vid_path) / (1024 * 1024), 2) if os.path.exists(ws_vid_path) else 0.0
+            record_video_history(ws_id, {
+                "id": f"hist_{job_id}",
+                "title": f"Video Vietsub Cloud #{job_id[:8]}",
+                "filename": "output_vietsub.mp4",
+                "file_path": ws_vid_path,
+                "file_size_mb": sz_mb,
+                "gofile_url": gf_url or dir_url or ""
+            })
+        except Exception as e_hist:
+            print(f"[!] Lỗi ghi history video: {e_hist}", flush=True)
 
     return jsonify({"status": "ok"})
 
@@ -7059,6 +7945,12 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
         except Exception as e_sb:
             print(f"[!] SmartBlur auto detect notice: {e_sb}")
 
+    is_short = bool(total_dur and float(total_dur) <= 900.0)
+    smartsub_mode = settings.get("smartsubMode", "auto")
+    use_opaque_box = (smartsub_mode == "opaque_box") or (smartsub_mode == "auto" and is_short)
+    if use_opaque_box:
+        blur_rect = {"x": 0, "y": 0, "w": 0, "h": 0}
+
     srt_path = os.path.join(work_dir, "sub_vi.srt")
     with open(srt_path, "w", encoding="utf-8") as f:
         for idx, seg in enumerate(segments, start=1):
@@ -7066,7 +7958,7 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
 
     generate_vtt_file(os.path.join(work_dir, "sub_vi.vtt"), segments)
     ass_path = os.path.join(work_dir, "sub_vi.ass")
-    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang)
+    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang, use_opaque_box=use_opaque_box)
 
     inject_dvd_bouncing_text_into_ass(ass_path, vid_w, vid_h, total_dur, ADDON_SETTINGS)
 
@@ -7188,7 +8080,7 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                     video_path = retimed_mp4
                     vid_w, vid_h, total_dur = get_video_info(video_path)
                     segments = new_segments
-                    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang)
+                    generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang, use_opaque_box=use_opaque_box)
                     inject_dvd_bouncing_text_into_ass(ass_path, vid_w, vid_h, total_dur, ADDON_SETTINGS)
 
             orig_a = None
@@ -7255,12 +8147,25 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
         if res_copy.returncode != 0:
             raise RuntimeError(f"FFmpeg copy thất bại: {(res_copy.stderr or '')[-300:].strip()}")
         progress_cb(100, "⚡ Xuất tức thì hoàn tất!")
+        try:
+            eff_ws = get_workspace_id()
+            sz_mb = round(os.path.getsize(output_path) / (1024 * 1024), 2) if os.path.exists(output_path) else 0.0
+            record_video_history(eff_ws, {
+                "title": os.path.basename(video_path or "output_vietsub.mp4"),
+                "filename": os.path.basename(output_path),
+                "file_path": output_path,
+                "file_size_mb": sz_mb
+            })
+        except Exception:
+            pass
         return {"status": "ok", "render_mode": "copy", "badge_label": "⚡ Xuất Tức Thì", "output_path": output_path}
 
+    blur_areas = settings.get("blurAreas") or settings.get("blur_areas") or []
     logo_path = os.path.join(TEMP_DIR, "watermark_logo.png")
     vf_chain, use_logo = build_filter_complex_with_logo(
         vid_w, vid_h, blur_rect, blur_sigma, blur_opacity, blur_color,
-        ass_filename=ass_path, logo_path=logo_path, addon_cfg=ADDON_SETTINGS
+        ass_filename=ass_path, logo_path=logo_path, addon_cfg=ADDON_SETTINGS,
+        blur_areas=blur_areas
     )
 
     cmd = ["ffmpeg", "-y", "-i", video_path]
@@ -7289,6 +8194,17 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
         print(f"[!] Lỗi FFmpeg render: {err_tail}", flush=True)
         raise RuntimeError(f"FFmpeg render thất bại: {err_tail}")
     progress_cb(100, "Xuất Video hoàn tất 100%!")
+    try:
+        eff_ws = get_workspace_id()
+        sz_mb = round(os.path.getsize(output_path) / (1024 * 1024), 2) if os.path.exists(output_path) else 0.0
+        record_video_history(eff_ws, {
+            "title": os.path.basename(video_path or "output_vietsub.mp4"),
+            "filename": os.path.basename(output_path),
+            "file_path": output_path,
+            "file_size_mb": sz_mb
+        })
+    except Exception:
+        pass
     return {"status": "ok", "render_mode": render_mode, "badge_label": "Hoàn tất 100%", "output_path": output_path}
 
 @app.route("/render", methods=["POST"])
@@ -7744,6 +8660,21 @@ def api_admin_add_quota():
     ok, new_limit = add_license_quota(key_str, amt)
     return jsonify({"status": "ok" if ok else "fail", "quota_limit": new_limit, "new_quota_limit": new_limit})
 
+@app.route("/api/admin/set_quota", methods=["POST"])
+def api_admin_set_quota():
+    if not check_admin_token(request):
+        return jsonify({"error": "Chưa đăng nhập quyền Admin!"}), 401
+    data = request.json or {}
+    key_str = data.get("key")
+    if not key_str:
+        return jsonify({"error": "Thiếu key!"}), 400
+    q_limit = data.get("quota_limit")
+    q_used = data.get("quota_used")
+    ok, limit, used = set_license_quota(key_str, quota_limit=q_limit, quota_used=q_used)
+    if ok:
+        return jsonify({"status": "ok", "quota_limit": limit, "quota_used": used})
+    return jsonify({"error": "Không tìm thấy key"}), 404
+
 @app.route("/api/admin/revoke_key", methods=["POST"])
 def api_admin_revoke_key():
     if not check_admin_token(request):
@@ -7876,6 +8807,7 @@ def api_admin_workspaces():
                     "kaggle_username": cfg.get("kaggle_username", ""),
                     "github_repo": cfg.get("github_repo", ""),
                     "videos": videos,
+                    "history": load_workspace_history(ws_id),
                     "jobs": ws_jobs
                 })
 
