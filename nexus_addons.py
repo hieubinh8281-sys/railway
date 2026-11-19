@@ -407,10 +407,9 @@ def build_filter_complex_with_logo(
         base_chain = f"[0:v]ass=\\'{escaped_ass}\\'[v_sub]"
     elif len(valid_areas) == 1:
         a = valid_areas[0]
+        safe_r = max(2, min(eff_sigma, min(a['w'], a['h']) // 3))
         b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
-        # Kết hợp avgblur làm mịn chi tiết và boxblur lũy thừa 2 xóa triệt để chữ
-        b_steps.append(f"avgblur=sizeX={eff_sigma}:sizeY={eff_sigma}:planes=7")
-        b_steps.append(f"boxblur=luma_radius={eff_sigma}:luma_power=2:chroma_radius={eff_sigma}")
+        b_steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_r}")
         if blur_opacity > 0.02:
             b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
         base_chain = (
@@ -424,9 +423,9 @@ def build_filter_complex_with_logo(
         split_names = "".join([f"[cs{i}]" for i in range(n)])
         chain_parts = [f"[0:v]split={n+1}[main]{split_names}"]
         for i, a in enumerate(valid_areas):
+            safe_r = max(2, min(eff_sigma, min(a['w'], a['h']) // 3))
             b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
-            b_steps.append(f"avgblur=sizeX={eff_sigma}:sizeY={eff_sigma}:planes=7")
-            b_steps.append(f"boxblur=luma_radius={eff_sigma}:luma_power=2:chroma_radius={eff_sigma}")
+            b_steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_r}")
             if blur_opacity > 0.02:
                 b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
             chain_parts.append(f"[cs{i}]{','.join(b_steps)}[bl{i}]")
@@ -441,7 +440,7 @@ def build_filter_complex_with_logo(
 
     use_logo = bool(cfg.get("logo_enabled") and logo_path and os.path.exists(logo_path))
     if not use_logo:
-        return base_chain.replace("[v_sub]", ",format=yuv420p[outv]"), False
+        return base_chain.replace("[v_sub]", ",scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[outv]"), False
 
     logo_w = max(32, min(400, int(cfg.get("logo_scale", 110))))
     logo_alpha = max(0.1, min(1.0, float(cfg.get("logo_opacity", 75)) / 100.0))
@@ -462,8 +461,8 @@ def build_filter_complex_with_logo(
     # Lưu ý: Input của Logo sẽ được truyền vào làm input cuối cùng của FFmpeg
     logo_chain = (
         f"{base_chain};"
-        f"[LOGO_IN]scale={logo_w}:-1,format=rgba,colorchannelmixer=aa={logo_alpha:.2f}[logo_img];"
-        f"[v_sub][logo_img]overlay={pos_expr}:shortest=1,format=yuv420p[outv]"
+        f"[LOGO_IN]scale={logo_w}:-2,format=rgba,colorchannelmixer=aa={logo_alpha:.2f}[logo_img];"
+        f"[v_sub][logo_img]overlay={pos_expr}:shortest=1,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[outv]"
     )
     return logo_chain, True
 
