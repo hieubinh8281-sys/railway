@@ -1053,6 +1053,58 @@ def probe_video_info(video_path):
         total_dur = float(info.get("format", {}).get("duration", 0.0))
         return vid_w, vid_h, total_dur, has_audio
 
+def detect_sub_blur_area(video_path, vid_w, vid_h):
+    try:
+        import av
+        import numpy as np
+        with av.open(video_path) as container:
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+            total_dur = float(container.duration / av.time_base) if container.duration else 180.0
+            scan_limit = min(total_dur, 180.0)
+            y_top = int(vid_h * 0.55)
+            y_bot = int(vid_h * 0.96)
+            roi_h = y_bot - y_top
+            sample_step = max(0.5, scan_limit / 80.0)
+            next_t = 0.0
+            row_energy = np.zeros(roi_h, dtype=np.float64)
+            active_cnt = 0
+            for frame in container.decode(stream):
+                if frame.pts is None: continue
+                t = float(frame.pts * stream.time_base)
+                if t < next_t: continue
+                if t > scan_limit: break
+                next_t = t + sample_step
+                img = frame.to_ndarray(format="rgb24")
+                xl, xr = int(vid_w * 0.15), int(vid_w * 0.85)
+                roi = img[y_top:y_bot, xl:xr]
+                gray = (0.299 * roi[..., 0] + 0.587 * roi[..., 1] + 0.114 * roi[..., 2]).astype(np.float32)
+                grad_x = np.abs(np.diff(gray, axis=1))
+                edges = np.mean(grad_x > 30.0, axis=1)
+                if np.max(edges) > 0.04:
+                    row_energy += edges
+                    active_cnt += 1
+            if active_cnt >= 2 and np.max(row_energy) > 0:
+                kernel = np.ones(5) / 5.0
+                smoothed = np.convolve(row_energy / active_cnt, kernel, mode="same")
+                peak = int(np.argmax(smoothed))
+                thresh = float(smoothed[peak]) * 0.25
+                top = peak
+                while top > 0 and smoothed[top] >= thresh: top -= 1
+                bot = peak
+                while bot < roi_h - 1 and smoothed[bot] >= thresh: bot += 1
+                pad = 14
+                y1 = max(0, y_top + top - pad)
+                y2 = min(vid_h, y_top + bot + pad)
+                h = max(28, y2 - y1) // 2 * 2
+                y = min(y1, vid_h - h) // 2 * 2
+                return {"x": 0, "y": y, "w": vid_w // 2 * 2, "h": h}
+    except Exception as e_scan:
+        print(f"[!] Auto scan sub notice: {e_scan}", flush=True)
+    def_h = int(vid_h * 0.15) // 2 * 2
+    def_y = int(vid_h * 0.78) // 2 * 2
+    return {"x": 0, "y": def_y, "w": vid_w // 2 * 2, "h": def_h}
+
 def format_srt_time(seconds):
     seconds = max(0.0, float(seconds or 0.0))
     hrs = int(seconds // 3600)
@@ -1612,17 +1664,27 @@ def run_worker():
             if bw >= 8 and bh >= 8:
                 valid_areas.append({"x": bx, "y": by, "w": bw, "h": bh})
 
+        # NẾU CHƯA CÓ VÙNG CHE MỜ: TỰ ĐỘNG QUÉT VỊ TRÍ PHỤ ĐỀ HOẶC CHE DẢI ĐÁY TIÊU CHUẨN
+        if len(valid_areas) == 0:
+            report_progress(78, "🔍 SmartBlur: Đang tự động quét vị trí dòng phụ đề gốc...")
+            detected = detect_sub_blur_area(video_input_name, vid_w, vid_h)
+            valid_areas.append(detected)
+            print(f"[*] SmartBlur auto-detected region: {detected}", flush=True)
+
         b_op = float(st.get("blurOpacity", 0)) / 100.0
-        b_sig = int(st.get("blurSigma", 22))
-        eff_sig = max(6, b_sig if b_sig > 0 else 22)
+        b_sig = int(st.get("blurSigma", 24))
+        eff_sig = max(10, b_sig if b_sig > 0 else 24)
         b_col = st.get("blurColor", "#000000").lstrip('#')
 
         def build_blur_box(a):
-            safe_r = max(2, min(eff_sig, min(a['w'], a['h']) // 3))
-            steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
-            steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_r}")
-            if b_op > 0.02:
-                steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{b_col}@{b_op:.2f}:t=fill")
+            aw, ah = a['w'], a['h']
+            safe_r = min(32, max(8, int(ah * 0.38)))
+            safe_r = min(safe_r, ah // 2 - 1)
+            safe_r = max(2, safe_r)
+            steps = [f"crop={aw}:{ah}:{a['x']}:{a['y']}"]
+            steps.append(f"boxblur=luma_radius={safe_r}:luma_power=3:chroma_radius={safe_r}")
+            eff_opacity = b_op if b_op > 0.02 else 0.22
+            steps.append(f"drawbox=x=0:y=0:w={aw}:h={ah}:color=0x{b_col}@{eff_opacity:.2f}:t=fill")
             return ",".join(steps)
 
         if len(valid_areas) == 0:
@@ -2346,127 +2408,100 @@ HTML_TEMPLATE = """
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap');
 
-        /* ========== KEYFRAME ANIMATIONS ========== */
-        @keyframes neonPulse {
-            0%, 100% { opacity: 1; filter: brightness(1); }
-            50% { opacity: 0.75; filter: brightness(1.35); }
-        }
+        /* ========== STREAMLINED CLEAN STUDIO THEME (LIGHTWEIGHT, NO-LAG) ========== */
+        /* Keyframe tối giản, mượt mà và nhẹ nhàng */
         @keyframes shimmer {
             0% { background-position: -200% 0; }
             100% { background-position: 200% 0; }
         }
-        @keyframes borderGlow {
-            0%, 100% { border-color: var(--accent-border); box-shadow: 0 0 8px var(--accent-glow); }
-            50% { border-color: var(--accent-primary); box-shadow: 0 0 22px var(--accent-glow), 0 0 44px var(--neon-glow); }
-        }
-        @keyframes nebulaFloat {
-            0%, 100% { transform: translateY(0) scale(1); opacity: 0.08; }
-            50% { transform: translateY(-18px) scale(1.06); opacity: 0.14; }
-        }
-        @keyframes gridScroll {
-            0% { background-position: 0 0; }
-            100% { background-position: 0 60px; }
-        }
-        @keyframes glowBreath {
-            0%, 100% { box-shadow: 0 0 6px var(--accent-glow), 0 0 18px transparent; }
-            50% { box-shadow: 0 0 10px var(--accent-glow), 0 0 30px var(--neon-glow); }
-        }
-        @keyframes textGlow {
-            0%, 100% { text-shadow: 0 0 6px var(--accent-glow); }
-            50% { text-shadow: 0 0 14px var(--accent-glow), 0 0 28px var(--neon-glow); }
-        }
-        @keyframes holographicSheen {
-            0% { background-position: -300% 0; }
-            100% { background-position: 300% 0; }
-        }
 
-        /* ========== ROOT THEME VARIABLES ========== */
+        /* ========== ROOT THEME VARIABLES (CLEAN & SUBTLE) ========== */
         :root {
             --accent-primary: #0ea5e9;
             --accent-secondary: #6366f1;
             --accent-gradient: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
-            --accent-glow: rgba(14, 165, 233, 0.45);
+            --accent-glow: rgba(14, 165, 233, 0.15);
             --accent-text: #38bdf8;
-            --accent-border: rgba(14, 165, 233, 0.4);
-            --bg-deep: #030509;
-            --panel-bg: rgba(8, 12, 24, 0.82);
-            --panel-glass: rgba(14, 20, 36, 0.55);
-            --card-bg: rgba(12, 18, 32, 0.6);
-            --border-subtle: rgba(255, 255, 255, 0.07);
+            --accent-border: rgba(14, 165, 233, 0.35);
+            --bg-deep: #0b0f19;
+            --panel-bg: rgba(15, 23, 42, 0.95);
+            --panel-glass: rgba(17, 24, 39, 0.92);
+            --card-bg: rgba(30, 41, 59, 0.65);
+            --border-subtle: rgba(255, 255, 255, 0.08);
             --sub-font-size: 14px;
-            --neon-glow: rgba(14, 165, 233, 0.22);
-            --border-glow: rgba(14, 165, 233, 0.35);
+            --neon-glow: transparent;
+            --border-glow: rgba(14, 165, 233, 0.25);
         }
 
-        /* ========== THEME OVERRIDES ========== */
+        /* ========== THEME OVERRIDES (MINIMAL & SHARP) ========== */
         [data-theme="violet"] {
             --accent-primary: #a855f7;
             --accent-secondary: #8b5cf6;
             --accent-gradient: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
-            --accent-glow: rgba(168, 85, 247, 0.45);
+            --accent-glow: rgba(168, 85, 247, 0.15);
             --accent-text: #c084fc;
-            --accent-border: rgba(168, 85, 247, 0.45);
-            --neon-glow: rgba(168, 85, 247, 0.22);
-            --border-glow: rgba(168, 85, 247, 0.35);
-            --panel-glass: rgba(22, 12, 36, 0.55);
+            --accent-border: rgba(168, 85, 247, 0.35);
+            --neon-glow: transparent;
+            --border-glow: rgba(168, 85, 247, 0.25);
+            --panel-glass: rgba(24, 16, 38, 0.92);
         }
         [data-theme="emerald"] {
             --accent-primary: #10b981;
             --accent-secondary: #06b6d4;
             --accent-gradient: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
-            --accent-glow: rgba(16, 185, 129, 0.45);
+            --accent-glow: rgba(16, 185, 129, 0.15);
             --accent-text: #34d399;
-            --accent-border: rgba(16, 185, 129, 0.45);
-            --neon-glow: rgba(16, 185, 129, 0.22);
-            --border-glow: rgba(16, 185, 129, 0.35);
-            --panel-glass: rgba(8, 24, 18, 0.55);
+            --accent-border: rgba(16, 185, 129, 0.35);
+            --neon-glow: transparent;
+            --border-glow: rgba(16, 185, 129, 0.25);
+            --panel-glass: rgba(12, 30, 24, 0.92);
         }
         [data-theme="amber"] {
             --accent-primary: #f59e0b;
             --accent-secondary: #ea580c;
             --accent-gradient: linear-gradient(135deg, #f59e0b 0%, #ea580c 100%);
-            --accent-glow: rgba(245, 158, 11, 0.45);
+            --accent-glow: rgba(245, 158, 11, 0.15);
             --accent-text: #fbbf24;
-            --accent-border: rgba(245, 158, 11, 0.45);
-            --neon-glow: rgba(245, 158, 11, 0.22);
-            --border-glow: rgba(245, 158, 11, 0.35);
-            --panel-glass: rgba(28, 18, 8, 0.55);
+            --accent-border: rgba(245, 158, 11, 0.35);
+            --neon-glow: transparent;
+            --border-glow: rgba(245, 158, 11, 0.25);
+            --panel-glass: rgba(30, 22, 14, 0.92);
         }
         [data-theme="crimson"] {
             --accent-primary: #f43f5e;
             --accent-secondary: #be123c;
             --accent-gradient: linear-gradient(135deg, #f43f5e 0%, #be123c 100%);
-            --accent-glow: rgba(244, 63, 94, 0.45);
+            --accent-glow: rgba(244, 63, 94, 0.15);
             --accent-text: #fb7185;
-            --accent-border: rgba(244, 63, 94, 0.45);
-            --neon-glow: rgba(244, 63, 94, 0.22);
-            --border-glow: rgba(244, 63, 94, 0.35);
-            --panel-glass: rgba(32, 10, 14, 0.55);
+            --accent-border: rgba(244, 63, 94, 0.35);
+            --neon-glow: transparent;
+            --border-glow: rgba(244, 63, 94, 0.25);
+            --panel-glass: rgba(34, 14, 20, 0.92);
         }
         [data-theme="obsidian"] {
             --accent-primary: #94a3b8;
             --accent-secondary: #64748b;
             --accent-gradient: linear-gradient(135deg, #64748b 0%, #94a3b8 100%);
-            --accent-glow: rgba(148, 163, 184, 0.35);
+            --accent-glow: rgba(148, 163, 184, 0.15);
             --accent-text: #cbd5e1;
-            --accent-border: rgba(148, 163, 184, 0.4);
-            --neon-glow: rgba(148, 163, 184, 0.18);
-            --border-glow: rgba(148, 163, 184, 0.3);
-            --panel-glass: rgba(16, 18, 22, 0.55);
+            --accent-border: rgba(148, 163, 184, 0.35);
+            --neon-glow: transparent;
+            --border-glow: rgba(148, 163, 184, 0.2);
+            --panel-glass: rgba(20, 24, 30, 0.92);
         }
         [data-theme="cyber"] {
             --accent-primary: #0ea5e9;
             --accent-secondary: #6366f1;
             --accent-gradient: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
-            --accent-glow: rgba(14, 165, 233, 0.45);
+            --accent-glow: rgba(14, 165, 233, 0.15);
             --accent-text: #38bdf8;
-            --accent-border: rgba(14, 165, 233, 0.4);
-            --neon-glow: rgba(14, 165, 233, 0.22);
-            --border-glow: rgba(14, 165, 233, 0.35);
-            --panel-glass: rgba(8, 12, 28, 0.55);
+            --accent-border: rgba(14, 165, 233, 0.35);
+            --neon-glow: transparent;
+            --border-glow: rgba(14, 165, 233, 0.25);
+            --panel-glass: rgba(17, 24, 39, 0.92);
         }
 
-        /* ========== LIVE CSS BINDINGS FOR THEME TRANSFORMATION ========== */
+        /* ========== LIVE CSS BINDINGS ========== */
         [data-theme] .text-sky-400,
         [data-theme] .text-sky-300 {
             color: var(--accent-text) !important;
@@ -2479,106 +2514,70 @@ HTML_TEMPLATE = """
         }
         [data-theme] #btnAutoAll {
             background: var(--accent-gradient) !important;
-            box-shadow: 0 4px 18px var(--accent-glow), 0 0 40px var(--neon-glow) !important;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3) !important;
         }
         [data-theme] #progressBar,
         [data-theme] #mobProgressBar {
             background: var(--accent-gradient) !important;
-            animation: neonPulse 2.5s ease-in-out infinite !important;
         }
         [data-theme] .nav-pill.active {
             background: var(--accent-gradient) !important;
             color: #ffffff !important;
-            box-shadow: 0 4px 14px var(--accent-glow), 0 0 28px var(--neon-glow) !important;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
         }
 
-        /* ========== DEEP SPACE BACKGROUND (OPTIMIZED 60FPS) ========== */
+        /* ========== CLEAN DARK BACKGROUND ========== */
         body {
             background-color: var(--bg-deep);
-            background-image:
-                radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.08) 0px, transparent 45%),
-                radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.08) 0px, transparent 45%),
-                radial-gradient(at 50% 100%, rgba(14, 165, 233, 0.05) 0px, transparent 50%),
-                radial-gradient(at 70% 30%, rgba(99, 102, 241, 0.06) 0px, transparent 40%);
             color: #f1f5f9;
-            font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+            font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
             overflow: hidden;
             position: relative;
-        }
-        /* Static sleek grid overlay - 0% CPU overhead */
-        body::before {
-            content: '';
-            position: fixed;
-            inset: 0;
-            background-image:
-                linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px);
-            background-size: 60px 60px;
-            pointer-events: none;
-            z-index: 0;
-            transform: translateZ(0);
         }
 
         /* ========== TYPOGRAPHY ========== */
         .mono { font-family: 'JetBrains Mono', monospace; }
 
-        /* ========== GLASSMORPHISM PANELS (OPTIMIZED COMPOSITING) ========== */
+        /* ========== CLEAN STUDIO PANELS & CARDS ========== */
         .studio-panel {
             background: var(--panel-glass);
             border: 1px solid var(--border-subtle);
-            box-shadow:
-                0 16px 40px -12px rgba(0, 0, 0, 0.8),
-                0 0 1px 0 rgba(255, 255, 255, 0.05),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            border-radius: 16px;
-            transition: border-color 0.2s ease;
+            box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.4);
+            border-radius: 14px;
             position: relative;
             z-index: 1;
-            transform: translateZ(0);
         }
         .studio-panel:hover {
-            border-color: rgba(255, 255, 255, 0.12);
+            border-color: rgba(255, 255, 255, 0.15);
         }
 
         .studio-card {
             background: var(--card-bg);
             border: 1px solid var(--border-subtle);
-            backdrop-filter: blur(6px);
-            -webkit-backdrop-filter: blur(6px);
-            border-radius: 14px;
-            box-shadow:
-                0 6px 20px -4px rgba(0, 0, 0, 0.5),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.03);
-            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+            transition: border-color 0.15s ease;
             position: relative;
             z-index: 1;
-            transform: translateZ(0);
         }
         .studio-card:hover {
             border-color: var(--border-glow);
-            box-shadow:
-                0 8px 24px -6px rgba(0, 0, 0, 0.6),
-                0 0 14px var(--neon-glow);
         }
 
         /* ========== NAVIGATION PILLS ========== */
         .nav-pill {
-            transition: all 0.3s ease;
-            border-radius: 12px;
+            transition: background-color 0.15s ease, color 0.15s ease;
+            border-radius: 10px;
             position: relative;
             z-index: 1;
         }
         .nav-pill:hover {
-            background: rgba(255, 255, 255, 0.05);
-            transform: translateY(-1px);
+            background: rgba(255, 255, 255, 0.08);
         }
         .nav-pill.active {
             background: var(--accent-gradient);
             color: #ffffff;
-            box-shadow: 0 4px 14px var(--accent-glow), 0 0 28px var(--neon-glow);
-            animation: glowBreath 3s ease-in-out infinite;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
         }
 
         /* ========== SUBTITLE TIMELINE ========== */
@@ -2589,51 +2588,48 @@ HTML_TEMPLATE = """
         input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
         input[type="color"]::-webkit-color-swatch { border: 1px solid #475569; border-radius: 8px; }
 
-        /* ========== CUSTOM NEON SCROLLBARS ========== */
+        /* ========== CLEAN SCROLLBARS ========== */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: rgba(5, 7, 13, 0.6); border-radius: 3px; }
+        ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); border-radius: 3px; }
         ::-webkit-scrollbar-thumb {
-            background: linear-gradient(180deg, var(--accent-primary), var(--accent-secondary));
+            background: rgba(255, 255, 255, 0.18);
             border-radius: 3px;
-            box-shadow: 0 0 6px var(--neon-glow);
         }
         ::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(180deg, var(--accent-text), var(--accent-primary));
-            box-shadow: 0 0 12px var(--accent-glow);
+            background: rgba(255, 255, 255, 0.3);
         }
 
         /* ========== VIDEO CUES ========== */
-        video::cue { background: rgba(0,0,0,0.75); color: #e1ff00; font-weight: bold; text-shadow: 0 0 8px rgba(225, 255, 0, 0.5); }
+        video::cue { background: rgba(0,0,0,0.8); color: #fff; font-weight: bold; }
 
         /* ========== GLOBAL TRANSITIONS & INTERACTIVITY ========== */
         button, a, select, input, .nav-pill, .studio-card {
-            transition: all 0.3s ease;
+            transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
         }
         button:hover, select:hover {
-            filter: brightness(1.1);
+            filter: brightness(1.08);
         }
         button:active {
-            transform: scale(0.97);
+            transform: scale(0.98);
         }
 
-        /* ========== NEON GLOW ON INTERACTIVE ELEMENTS ========== */
+        /* ========== FOCUS RING (CLEAN & PROFESSIONAL) ========== */
         button:focus-visible,
         select:focus-visible,
         input:focus-visible {
             outline: 2px solid var(--accent-primary);
-            outline-offset: 2px;
-            box-shadow: 0 0 12px var(--accent-glow), 0 0 30px var(--neon-glow);
+            outline-offset: 1px;
         }
 
-        /* ========== ANIMATED GRADIENT BORDERS ON FOCUSED INPUTS ========== */
+        /* ========== CLEAN INPUT FOCUS ========== */
         input[type="text"]:focus,
         input[type="number"]:focus,
         input[type="password"]:focus,
         select:focus,
         textarea:focus {
             border-color: var(--accent-primary) !important;
-            box-shadow: 0 0 0 2px var(--neon-glow), 0 0 20px var(--neon-glow);
-            animation: borderGlow 2s ease-in-out infinite;
+            box-shadow: 0 0 0 1px var(--accent-primary);
+            outline: none;
         }
 
         /* ========== CUSTOM RANGE INPUT SLIDERS ========== */
@@ -2641,51 +2637,36 @@ HTML_TEMPLATE = """
             -webkit-appearance: none;
             appearance: none;
             width: 100%;
-            height: 6px;
-            background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.12));
+            height: 5px;
+            background: rgba(255,255,255,0.12);
             border-radius: 3px;
             outline: none;
             cursor: pointer;
-            transition: all 0.3s ease;
         }
         input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
             appearance: none;
-            width: 16px;
-            height: 16px;
+            width: 15px;
+            height: 15px;
             border-radius: 50%;
-            background: var(--accent-gradient);
-            box-shadow: 0 0 8px var(--accent-glow), 0 2px 6px rgba(0,0,0,0.5);
+            background: var(--accent-primary);
             cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        input[type="range"]::-webkit-slider-thumb:hover {
-            transform: scale(1.2);
-            box-shadow: 0 0 16px var(--accent-glow), 0 0 32px var(--neon-glow);
+            box-shadow: 0 1px 4px rgba(0,0,0,0.4);
         }
         input[type="range"]::-moz-range-thumb {
-            width: 16px;
-            height: 16px;
+            width: 15px;
+            height: 15px;
             border-radius: 50%;
             border: none;
-            background: var(--accent-gradient);
-            box-shadow: 0 0 8px var(--accent-glow), 0 2px 6px rgba(0,0,0,0.5);
+            background: var(--accent-primary);
             cursor: pointer;
         }
-        input[type="range"]:hover {
-            background: linear-gradient(90deg, var(--neon-glow), rgba(255,255,255,0.12));
-        }
 
-        /* ========== TEXT GLOW EFFECTS ========== */
-        .text-sky-400, .text-sky-300 {
-            text-shadow: 0 0 8px var(--neon-glow);
-        }
-
-        /* ========== PROGRESS BAR GLOW (OPTIMIZED) ========== */
+        /* ========== PROGRESS BAR ========== */
         #progressBar, #mobProgressBar {
-            box-shadow: 0 0 10px var(--accent-glow);
             border-radius: 999px;
             transition: width 0.3s ease;
+        }
         }
 
         /* ========== HOLOGRAPHIC HEADER (CLEAN & FAST) ========== */
@@ -3069,6 +3050,19 @@ HTML_TEMPLATE = """
                             <span id="videoStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">Chưa có video</span>
                         </div>
                         <input type="file" id="videoInput" accept="video/*" class="block w-full text-xs text-slate-400 file:mr-2.5 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-sky-600 file:text-white hover:file:bg-sky-500 cursor-pointer"/>
+
+                        <!-- TẢI TỰ ĐỘNG TỪ LINK (YOUTUBE, BILIBILI, DOUYIN, TIKTOK...) -->
+                        <div class="pt-2 border-t border-slate-800/80 space-y-1.5">
+                            <span class="text-[11px] text-sky-400 font-bold block flex items-center gap-1">
+                                <i class="fa-solid fa-link text-sky-400"></i> Hoặc tải từ Link (YouTube / Bilibili / Douyin / TikTok):
+                            </span>
+                            <div class="flex items-center gap-1.5">
+                                <input type="text" id="videoUrlInput" placeholder="Dán link Bilibili, YouTube, Douyin, TikTok..." class="flex-1 bg-slate-950 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-sky-200 outline-none focus:border-sky-500 placeholder:text-slate-600 transition" onkeydown="if(event.key==='Enter')downloadVideoFromUrl();"/>
+                                <button id="btnDownloadUrl" onclick="downloadVideoFromUrl()" class="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 active:scale-95 text-white text-xs font-bold transition flex items-center gap-1 whitespace-nowrap shadow-sm">
+                                    <i class="fa-solid fa-cloud-arrow-down"></i> Tải & Nạp
+                                </button>
+                            </div>
+                        </div>
 
                         <div id="noAudioAlert" class="hidden p-2 rounded-lg bg-rose-950/80 border border-rose-700/60 text-[11px] text-rose-200">
                             <i class="fa-solid fa-triangle-exclamation text-rose-400 mr-1"></i>
@@ -4996,6 +4990,53 @@ HTML_TEMPLATE = """
             openProjectsModal();
         }
 
+        async function downloadVideoFromUrl() {
+            const input = document.getElementById('videoUrlInput');
+            const url = (input ? input.value : '').trim();
+            if (!url) {
+                alert("Vui lòng dán link video (YouTube, Bilibili, Douyin, TikTok...)!");
+                return;
+            }
+            const btn = document.getElementById('btnDownloadUrl');
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Đang tải...`;
+            setStatus(15, `Đang kết nối & tải video từ link: ${url.slice(0, 35)}...`);
+
+            try {
+                const res = await fetch('/api/video/download_url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url })
+                });
+                const data = await res.json();
+                if (!data.ok) {
+                    alert(data.error || "Không thể tải video từ link này!");
+                    setStatus(0, "Lỗi tải video từ link.");
+                    return;
+                }
+                input.value = '';
+                video.src = data.video_url;
+                video.load();
+                const shortTitle = (data.title || "input_video.mp4").slice(0, 35);
+                document.getElementById('videoStatusBadge').innerText = "Đã nạp Video";
+                document.getElementById('videoStatusBadge').className = "text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold";
+                const alertBox = document.getElementById('noAudioAlert');
+                if (alertBox) {
+                    if (!data.has_audio) alertBox.classList.remove('hidden');
+                    else alertBox.classList.add('hidden');
+                }
+                setTimeout(syncCanvasSize, 500);
+                setStatus(100, `Đã tải & nạp thành công video: ${shortTitle}!`);
+                showToast(`✅ Đã tải và nạp video thành công: ${shortTitle}! Sẵn sàng bấm A → Z.`, 5000);
+            } catch (err) {
+                alert("Lỗi kết nối khi tải video: " + err.message);
+                setStatus(0, "Lỗi kết nối.");
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = `<i class="fa-solid fa-cloud-arrow-down"></i> Tải & Nạp`;
+            }
+        }
+
         document.getElementById('videoInput').addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
@@ -6053,7 +6094,7 @@ HTML_TEMPLATE = """
                         const outVideo = document.getElementById('outputVideo');
                         document.getElementById('outputPlaceholder').classList.add('hidden');
                         outVideo.classList.remove('hidden');
-                        const finalPlaySrc = (data.direct_url || data.output_url || '') + (data.direct_url ? '' : '?t=' + Date.now());
+                        const finalPlaySrc = (data.output_url || data.direct_url || '') + (data.output_url ? '?t=' + Date.now() : '');
                         if (finalPlaySrc) {
                             outVideo.src = finalPlaySrc;
                             outVideo.load();
@@ -6160,7 +6201,7 @@ HTML_TEMPLATE = """
                         const outVideo = document.getElementById('outputVideo');
                         document.getElementById('outputPlaceholder').classList.add('hidden');
                         outVideo.classList.remove('hidden');
-                        const finalPlaySrc = (job.direct_url || job.output_url || '') + (job.direct_url ? '' : '?t=' + Date.now());
+                        const finalPlaySrc = (job.output_url || job.direct_url || '') + (job.output_url ? '?t=' + Date.now() : '');
                         if (finalPlaySrc) {
                             outVideo.src = finalPlaySrc;
                             outVideo.load();
@@ -6728,15 +6769,17 @@ def api_cloud_dispatch():
     # Nếu người dùng chưa vẽ khung che mờ tay, tự động chạy SmartBlur (quét 3-5p đầu che cả hàng) trước khi gửi lên Cloud!
     st = data.get("settings", {})
     br = st.get("blurRect", {"x": 0, "y": 0, "w": 0, "h": 0})
-    if int(br.get("w", 0)) < 10 and int(br.get("h", 0)) < 10 and st.get("renderMode") != "copy":
+    areas = st.get("blurAreas") or []
+    if (not areas or len(areas) == 0) and int(br.get("w", 0)) < 10 and st.get("renderMode") != "copy":
         try:
             sb_res = auto_detect_smartblur_fullrow(
                 video_path,
-                scan_minutes=ADDON_SETTINGS["smartblur_scan_minutes"],
-                pad_y=ADDON_SETTINGS["smartblur_pad_y"],
+                scan_minutes=ADDON_SETTINGS.get("smartblur_scan_minutes", 4),
+                pad_y=ADDON_SETTINGS.get("smartblur_pad_y", 14),
                 progress_cb=update_progress
             )
             st["blurRect"] = {"x": sb_res["x"], "y": sb_res["y"], "w": sb_res["w"], "h": sb_res["h"]}
+            st["blurAreas"] = [st["blurRect"]]
             data["settings"] = st
         except Exception:
             pass
@@ -7331,6 +7374,81 @@ def upload_video():
     LAST_AUDIO_SIGNATURE["sig"] = None
     audio_ok = has_audio_stream(video_path)
     return jsonify({"status": "ok", "video_url": f"/workspace/{ws_id}/input_video.mp4?t={int(time.time())}", "has_audio": audio_ok, "workspace": ws_id})
+
+@app.route("/api/video/download_url", methods=["POST"])
+def api_download_video_from_url():
+    """Tự động tải video từ YouTube, Bilibili, Douyin, TikTok... về workspace và nạp thẳng vào tool"""
+    data = request.json or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "Vui lòng nhập đường dẫn (link) video!"}), 400
+
+    ws_id = get_workspace_id(request)
+    ws_dir = get_workspace_dir(request)
+    os.makedirs(ws_dir, exist_ok=True)
+    video_path = os.path.join(ws_dir, "input_video.mp4")
+
+    # Xóa file cũ
+    for fp in [video_path, os.path.join(TEMP_DIR, "input_video.mp4")]:
+        if os.path.exists(fp):
+            try: os.remove(fp)
+            except Exception: pass
+
+    try:
+        import yt_dlp
+        target_template = os.path.join(ws_dir, "dl_temp.%(ext)s")
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+            'outtmpl': target_template,
+            'merge_output_format': 'mp4',
+            'overwrites': True,
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_title = info.get("title") or "Video từ Link"
+            duration = info.get("duration") or 0
+
+        downloaded_file = None
+        for cand in os.listdir(ws_dir):
+            if cand.startswith("dl_temp."):
+                downloaded_file = os.path.join(ws_dir, cand)
+                break
+
+        if not downloaded_file or not os.path.exists(downloaded_file):
+            return jsonify({"ok": False, "error": "Không thể tải video từ link này. Vui lòng kiểm tra lại đường dẫn!"}), 400
+
+        if downloaded_file.endswith(".mp4"):
+            shutil.move(downloaded_file, video_path)
+        else:
+            subprocess.run(["ffmpeg", "-y", "-i", downloaded_file, "-c", "copy", video_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+                subprocess.run(["ffmpeg", "-y", "-i", downloaded_file, "-c:v", "libx264", "-c:a", "aac", video_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try: os.remove(downloaded_file)
+            except Exception: pass
+
+        if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
+            return jsonify({"ok": False, "error": "Lỗi định dạng video sau khi tải về!"}), 500
+
+        try:
+            shutil.copy2(video_path, os.path.join(TEMP_DIR, "input_video.mp4"))
+        except Exception:
+            pass
+
+        LAST_AUDIO_SIGNATURE["sig"] = None
+        audio_ok = has_audio_stream(video_path)
+        return jsonify({
+            "ok": True,
+            "title": video_title,
+            "duration": duration,
+            "video_url": f"/workspace/{ws_id}/input_video.mp4?t={int(time.time())}",
+            "has_audio": audio_ok
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Lỗi tải video: {str(e)}"}), 500
 
 @app.route("/merge_audio", methods=["POST"])
 def merge_audio():
@@ -8634,9 +8752,12 @@ def api_pipeline_active_job():
 def api_pipeline_job_video(job_id, filename):
     job_dir = os.path.join(SERVER_JOBS_DIR, job_id)
     if os.path.exists(os.path.join(job_dir, filename)):
-        return send_from_directory(job_dir, filename)
+        return send_from_directory(job_dir, filename, conditional=True)
+    ws_dir = get_workspace_dir(request)
+    if os.path.exists(os.path.join(ws_dir, filename)):
+        return send_from_directory(ws_dir, filename, conditional=True)
     if os.path.exists(os.path.join(TEMP_DIR, filename)):
-        return send_from_directory(TEMP_DIR, filename)
+        return send_from_directory(TEMP_DIR, filename, conditional=True)
     # Tự động chuyển hướng sang Link trực tiếp hoặc GoFile nếu file chưa về đĩa Railway
     with SERVER_JOBS_LOCK:
         job = ACTIVE_SERVER_JOBS.get(job_id)
@@ -8649,11 +8770,11 @@ def api_pipeline_job_video(job_id, filename):
             except Exception:
                 pass
     if job:
-        if job.get("direct_url"):
-            return redirect(job["direct_url"])
         if job.get("gofile_url"):
             return redirect(job["gofile_url"])
-    return send_from_directory(TEMP_DIR, filename)
+        if job.get("direct_url"):
+            return redirect(job["direct_url"])
+    return send_from_directory(TEMP_DIR, filename, conditional=True)
 
 # ==================== CỔNG QUẢN TRỊ BẢN QUYỀN (ADMIN & CLIENT LICENSE) ====================
 
