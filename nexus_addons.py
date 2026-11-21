@@ -563,7 +563,26 @@ def api_addon_settings():
 @addons_bp.route("/api/addons/smartblur", methods=["POST"])
 def api_run_smartblur():
     temp_dir = ADDON_CONTEXT["temp_dir"]
-    video_path = os.path.join(temp_dir, "input_video.mp4") if temp_dir else ""
+    video_path = ""
+
+    # 1. Tìm video trong workspace người dùng (nếu có hệ thống workspace đa người dùng)
+    try:
+        import sys
+        main_mod = sys.modules.get("__main__")
+        if main_mod and hasattr(main_mod, "get_workspace_dir"):
+            ws_dir = main_mod.get_workspace_dir(request)
+            cand = os.path.join(ws_dir, "input_video.mp4")
+            if os.path.exists(cand) and os.path.getsize(cand) > 100:
+                video_path = cand
+    except Exception:
+        pass
+
+    # 2. Tìm video trong thư mục session chung
+    if not video_path:
+        cand = os.path.join(temp_dir, "input_video.mp4") if temp_dir else ""
+        if cand and os.path.exists(cand) and os.path.getsize(cand) > 100:
+            video_path = cand
+
     if not video_path or not os.path.exists(video_path):
         return jsonify({"error": "Vui lòng chọn tải Video lên trước khi chạy SmartBlur!"}), 400
 
@@ -690,33 +709,45 @@ window.addEventListener('DOMContentLoaded', () => {
 
 async function runAutoSmartBlur() {
     const btn = document.getElementById('btnSmartBlur');
-    const origHtml = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang quét 3-5p đầu...';
+    const origHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang quét 3-5p đầu...';
+    }
     if (typeof startPolling === 'function') startPolling();
     try {
+        const scanM = document.getElementById('sbScanMinutes') ? parseFloat(document.getElementById('sbScanMinutes').value || 4) : 4;
+        const padY = document.getElementById('sbPadY') ? parseInt(document.getElementById('sbPadY').value || 14) : 14;
         const res = await fetch('/api/addons/smartblur', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                scan_minutes: parseFloat(document.getElementById('sbScanMinutes').value || 4),
-                pad_y: parseInt(document.getElementById('sbPadY').value || 14)
-            })
+            body: JSON.stringify({ scan_minutes: scanM, pad_y: padY })
         });
         const data = await res.json();
         if (typeof stopPollingAndSync === 'function') await stopPollingAndSync();
-        if (data.error) return alert(data.error);
+        if (data.error) {
+            console.warn("Smartblur warning:", data.error);
+            return false;
+        }
 
         blurRect = { x: data.x, y: data.y, w: data.w, h: data.h };
+        if (typeof blurAreas !== 'undefined') {
+            blurAreas = [{ x: data.x, y: data.y, w: data.w, h: data.h }];
+            if (typeof renderBlurAreasList === 'function') renderBlurAreasList();
+        }
         if (typeof updateBoxLabels === 'function') updateBoxLabels();
         if (typeof drawOverlayOnCanvas === 'function') drawOverlayOnCanvas();
         if (typeof setStatus === 'function') setStatus(100, data.note || "Đã khóa SmartBlur toàn hàng ngang!");
+        return true;
     } catch (e) {
         if (typeof stopPollingAndSync === 'function') await stopPollingAndSync();
-        alert("Lỗi quét SmartBlur: " + e);
+        console.warn("Lỗi quét SmartBlur:", e);
+        return false;
     } finally {
-        btn.disabled = false;
-        btn.innerHTML = origHtml;
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+        }
     }
 }
 
