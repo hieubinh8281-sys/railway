@@ -7379,9 +7379,28 @@ def upload_video():
 def api_download_video_from_url():
     """Tự động tải video từ YouTube, Bilibili, Douyin, TikTok... về workspace và nạp thẳng vào tool"""
     data = request.json or {}
-    url = (data.get("url") or "").strip()
-    if not url:
+    raw_url = (data.get("url") or "").strip()
+    if not raw_url:
         return jsonify({"ok": False, "error": "Vui lòng nhập đường dẫn (link) video!"}), 400
+
+    # 1. Trích xuất URL sạch nếu người dùng dán kèm văn bản chia sẻ từ app (Douyin, TikTok, Facebook)
+    url_match = re.search(r'https?://[^\s<>"\']+', raw_url)
+    if url_match:
+        url = url_match.group(0)
+    elif re.match(r'^(BV|bv)[0-9a-zA-Z]{10}$', raw_url):
+        url = f"https://www.bilibili.com/video/{raw_url}"
+    else:
+        url = raw_url
+
+    # 2. Chuẩn hóa link Bilibili: loại bỏ các tiền tố dịch tự động của trình duyệt như /vi/, /en/
+    url = re.sub(r'bilibili\.com/[a-zA-Z]{2}(-[a-zA-Z]{2})?/video/', 'bilibili.com/video/', url)
+
+    # 3. Kích hoạt ffmpeg vào PATH nếu có static_ffmpeg
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except Exception:
+        pass
 
     ws_id = get_workspace_id(request)
     ws_dir = get_workspace_dir(request)
@@ -7395,8 +7414,19 @@ def api_download_video_from_url():
             except Exception: pass
 
     try:
-        import yt_dlp
+        try:
+            import yt_dlp
+        except ModuleNotFoundError:
+            # Tự động cài đặt nóng yt-dlp tại runtime nếu môi trường Railway/VPS chưa kịp build
+            import sys
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "yt-dlp", "--no-cache-dir"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                import yt_dlp
+            except Exception as pe:
+                return jsonify({"ok": False, "error": f"Máy chủ Railway chưa có thư viện 'yt-dlp' và không thể tự cài ({pe}). Vui lòng thêm dòng 'yt-dlp>=2024.0.0' vào file requirements.txt trên GitHub Railway rồi bấm Redeploy!"}), 500
+
         target_template = os.path.join(ws_dir, "dl_temp.%(ext)s")
+        referer = 'https://www.bilibili.com/' if any(x in url.lower() for x in ['bilibili.com', 'b23.tv']) else 'https://www.google.com/'
         ydl_opts = {
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
             'outtmpl': target_template,
@@ -7405,7 +7435,12 @@ def api_download_video_from_url():
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+                'Referer': referer,
+                'Accept': '*/*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,vi;q=0.7'
+            }
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -7448,7 +7483,10 @@ def api_download_video_from_url():
             "has_audio": audio_ok
         })
     except Exception as e:
-        return jsonify({"ok": False, "error": f"Lỗi tải video: {str(e)}"}), 500
+        err_msg = str(e)
+        if "is unusual and will be skipped" in err_msg or "HTTP Error 404" in err_msg:
+            err_msg = "Không tìm thấy video từ link này (Lỗi 404 hoặc link sai). Với Bilibili, mã BV chuẩn gồm 12 ký tự (Ví dụ: BV1atse6EEfx), bạn vui lòng kiểm tra lại link gốc xem có bị thiếu ký tự không nhé!"
+        return jsonify({"ok": False, "error": f"Lỗi tải video: {err_msg}"}), 500
 
 @app.route("/merge_audio", methods=["POST"])
 def merge_audio():
