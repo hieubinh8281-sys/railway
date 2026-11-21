@@ -487,6 +487,7 @@ pydub>=0.25.1
 Pillow>=10.0.0
 numpy>=1.24.0
 av>=12.0.0
+yt-dlp>=2024.0.0
 audioop-lts; python_version >= '3.13'
 """
 
