@@ -1093,16 +1093,21 @@ def detect_sub_blur_area(video_path, vid_w, vid_h):
                 while top > 0 and smoothed[top] >= thresh: top -= 1
                 bot = peak
                 while bot < roi_h - 1 and smoothed[bot] >= thresh: bot += 1
-                pad = 14
-                y1 = max(0, y_top + top - pad)
-                y2 = min(vid_h, y_top + bot + pad)
-                h = max(28, y2 - y1) // 2 * 2
-                y = min(y1, vid_h - h) // 2 * 2
+                pad = 22
+                real_y1 = max(0, y_top + top - pad)
+                real_y2 = min(vid_h, y_top + bot + pad)
+                min_h = max(50, int(vid_h * 0.16)) // 2 * 2
+                if (real_y2 - real_y1) < min_h:
+                    mid_y = (real_y1 + real_y2) // 2
+                    real_y1 = max(0, mid_y - min_h // 2)
+                    real_y2 = min(vid_h, real_y1 + min_h)
+                h = max(min_h, real_y2 - real_y1) // 2 * 2
+                y = min(real_y1, vid_h - h) // 2 * 2
                 return {"x": 0, "y": y, "w": vid_w // 2 * 2, "h": h}
     except Exception as e_scan:
         print(f"[!] Auto scan sub notice: {e_scan}", flush=True)
-    def_h = int(vid_h * 0.15) // 2 * 2
-    def_y = int(vid_h * 0.78) // 2 * 2
+    def_h = int(vid_h * 0.18) // 2 * 2
+    def_y = int(vid_h * 0.74) // 2 * 2
     return {"x": 0, "y": def_y, "w": vid_w // 2 * 2, "h": def_h}
 
 def format_srt_time(seconds):
@@ -1678,12 +1683,12 @@ def run_worker():
 
         def build_blur_box(a):
             aw, ah = a['w'], a['h']
-            safe_r = min(32, max(8, int(ah * 0.38)))
-            safe_r = min(safe_r, ah // 2 - 1)
-            safe_r = max(2, safe_r)
+            safe_r = min(40, max(16, int(ah * 0.45)))
+            safe_r = min(safe_r, max(2, ah // 2 - 1))
             steps = [f"crop={aw}:{ah}:{a['x']}:{a['y']}"]
             steps.append(f"boxblur=luma_radius={safe_r}:luma_power=3:chroma_radius={safe_r}")
-            eff_opacity = b_op if b_op > 0.02 else 0.22
+            # Lớp kính đen mờ quang học 32% xóa sạch triệt để chữ gốc tiếng Trung
+            eff_opacity = max(b_op, 0.32) if b_op <= 0.05 else b_op
             steps.append(f"drawbox=x=0:y=0:w={aw}:h={ah}:color=0x{b_col}@{eff_opacity:.2f}:t=fill")
             return ",".join(steps)
 
@@ -1781,16 +1786,23 @@ def run_worker():
                 fb_cmd += ["-i", "mixed_audio.wav"]
                 fb_a_idx = 1
 
-            fb_vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2,subtitles='sub_vi.srt',format=yuv420p"
+            if len(valid_areas) > 0:
+                a = valid_areas[0]
+                b_chain = build_blur_box(a)
+                fb_vf = f"[0:v]split=2[fb_m][fb_cs];[fb_cs]{b_chain}[fb_bl];[fb_m][fb_bl]overlay={a['x']}:{a['y']}:shortest=1,subtitles='sub_vi.srt',scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[outv]"
+                fb_cmd += ["-filter_complex", fb_vf, "-map", "[outv]"]
+            else:
+                fb_vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2,subtitles='sub_vi.srt',format=yuv420p"
+                fb_cmd += ["-vf", fb_vf, "-map", "0:v:0"]
+
             fb_cmd += [
-                "-vf", fb_vf,
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "0",
                 "-movflags", "+faststart", "-c:a", "aac", "-b:a", "192k"
             ]
             if fb_a_idx is not None:
-                fb_cmd += ["-map", "0:v:0", "-map", f"{fb_a_idx}:a:0"]
+                fb_cmd += ["-map", f"{fb_a_idx}:a:0"]
             else:
-                fb_cmd += ["-map", "0:v:0", "-map", "0:a?"]
+                fb_cmd += ["-map", "0:a?"]
 
             fb_cmd.append("output_vietsub.mp4")
             fb_proc = subprocess.run(fb_cmd, cwd=work_dir, capture_output=True, text=True, errors="ignore")
