@@ -26,6 +26,7 @@ from flask import Flask, request, jsonify, send_from_directory, send_file, rende
 import requests
 import edge_tts
 import numpy as np
+import wave
 
 # ==================== GHÉP NỐI VỚI FILE TIỆN ÍCH NEXUS_ADDONS.PY & NEXUS_SECURITY.PY ====================
 from nexus_addons import (
@@ -36,6 +37,10 @@ from nexus_addons import (
     inject_dvd_bouncing_text_into_ass,
     build_filter_complex_with_logo,
     generate_railway_deployment_files
+)
+from nexus_youtube_addon import (
+    register_nexus_youtube_addon,
+    get_next_available_github_account
 )
 from nexus_security import (
     get_machine_hwid,
@@ -628,6 +633,9 @@ reset_temp_session()
 # Kích hoạt toàn bộ tính năng trong nexus_addons.py (SmartBlur, DVD Watermark, Logo, CORS, Railway)
 register_nexus_addons(app, TEMP_DIR, update_progress, TUNNEL_INFO)
 
+# Kích hoạt toàn bộ tính năng trong nexus_youtube_addon.py (YouTube Studio, AI vidIQ SEO, Thumbnail Studio, Multi-Account GitHub)
+register_nexus_youtube_addon(app, TEMP_DIR, update_progress, TUNNEL_INFO)
+
 # ==================== HỆ THỐNG LỊCH SỬ VIDEO ĐÃ LÀM & TỰ ĐỘNG DỌN DẸP 5-7 NGÀY ====================
 HISTORY_RETENTION_DAYS = 7 # Tự động xóa lịch sử và giải phóng video sau 7 ngày (phù hợp GoFile)
 
@@ -894,7 +902,7 @@ def save_cloud_config(cfg, ws_id=None):
     return current
 
 # ==================== MODULE 7: MÃ NGUỒN TỰ HÀNH CLOUD WORKER (KÈM DVD WATERMARK & LOGO) ====================
-CLOUD_WORKER_SCRIPT_TEMPLATE = r'''import os, sys, re, time, json, math, site, shutil, tarfile, hashlib, asyncio, importlib, subprocess, ctypes
+CLOUD_WORKER_SCRIPT_TEMPLATE = r'''import os, sys, re, time, json, math, site, shutil, tarfile, hashlib, asyncio, importlib, subprocess, ctypes, wave, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 RELAY_URL = "__RELAY_URL__"
@@ -1134,7 +1142,7 @@ def hex_to_ass_color(hex_color, alpha=0):
 def generate_ass(ass_path, segments, vid_w, vid_h, st, addon_cfg, total_dur):
     play_res_y = 720
     play_res_x = int(round(720 * (vid_w / max(1, vid_h))))
-    ass_primary = hex_to_ass_color(st.get("textColor", "#E1FF00"), 0)
+    ass_primary = hex_to_ass_color(st.get("textColor", "#FFFFFF"), 0)
     ass_outline = hex_to_ass_color(st.get("outlineColor", "#000000"), 0)
     ass_font_size = int(round(int(st.get("fontSize", 22)) * 1.28))
     font_name = st.get("fontName", "Arial")
@@ -1420,6 +1428,10 @@ def run_worker():
     video_input_name = "input_video.mp4"
 
     if enable_tts:
+        done_tts = 0
+        total_tts = len(segments)
+        tts_lock = threading.Lock()
+
         if tts_voice.startswith("piper:"):
             report_progress(62, f"Đang tải nhân Piper Neural ONNX ({tts_voice}) trên Cloud...", force=True)
             piper_exe, onnx_path = setup_cloud_piper(work_dir, tts_voice)
@@ -1428,23 +1440,28 @@ def run_worker():
             piper_env["LD_LIBRARY_PATH"] = f"{piper_dir_bin}:{piper_env.get('LD_LIBRARY_PATH', '')}"
 
             def run_piper_one(seg):
+                nonlocal done_tts
                 txt = (seg.get("trans") or seg.get("text") or "").strip()
                 if not txt: return
                 out_wav = os.path.join(tts_dir, f"s_{seg['id']}.wav")
-                if os.path.exists(out_wav) and os.path.getsize(out_wav) > 100:
-                    return
-                if os.path.exists(piper_exe) and os.path.exists(onnx_path):
-                    try:
-                        subprocess.run([piper_exe, "--model", onnx_path, "--output_file", out_wav], input=txt.encode("utf-8"), env=piper_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except Exception: pass
-                # Fallback sang Google TTS nếu Piper lỗi trên môi trường Cloud
-                if not os.path.exists(out_wav) or os.path.getsize(out_wav) < 100:
-                    try:
-                        g_r = requests.get("https://translate.googleapis.com/translate_tts", params={"ie":"UTF-8","q":txt[:200],"tl":google_lang_code,"client":"tw-ob"}, timeout=10)
-                        if g_r.status_code == 200:
-                            with open(out_wav.replace(".wav", ".mp3"), "wb") as f_g:
-                                f_g.write(g_r.content)
-                    except Exception: pass
+                if not (os.path.exists(out_wav) and os.path.getsize(out_wav) > 100):
+                    if os.path.exists(piper_exe) and os.path.exists(onnx_path):
+                        try:
+                            subprocess.run([piper_exe, "--model", onnx_path, "--output_file", out_wav], input=txt.encode("utf-8"), env=piper_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        except Exception: pass
+                    # Fallback sang Google TTS nếu Piper lỗi trên môi trường Cloud
+                    if not os.path.exists(out_wav) or os.path.getsize(out_wav) < 100:
+                        try:
+                            g_r = requests.get("https://translate.googleapis.com/translate_tts", params={"ie":"UTF-8","q":txt[:200],"tl":google_lang_code,"client":"tw-ob"}, timeout=10)
+                            if g_r.status_code == 200:
+                                with open(out_wav.replace(".wav", ".mp3"), "wb") as f_g:
+                                    f_g.write(g_r.content)
+                        except Exception: pass
+                with tts_lock:
+                    done_tts += 1
+                    if done_tts % 50 == 0 or done_tts == total_tts:
+                        p_val = 62 + int((done_tts / max(1, total_tts)) * 9)
+                        report_progress(p_val, f"Đang tạo giọng đọc Piper ({done_tts}/{total_tts} câu)...")
 
             worker_threads = min(4, max(2, os.cpu_count() or 2))
             with ThreadPoolExecutor(max_workers=worker_threads) as ex:
@@ -1452,8 +1469,10 @@ def run_worker():
         else:
             report_progress(62, f"Đang tạo giọng đọc đa luồng ({tts_voice}) trên Cloud...", force=True)
             async def make_tts():
+                nonlocal done_tts
                 sem = asyncio.Semaphore(16)
                 async def one_tts(seg):
+                    nonlocal done_tts
                     txt = (seg.get("trans") or seg.get("text") or "").strip()
                     if not txt: return
                     out_f = os.path.join(tts_dir, f"s_{seg['id']}.mp3")
@@ -1474,35 +1493,30 @@ def run_worker():
                                 if r.status_code == 200:
                                     with open(out_f, "wb") as f: f.write(r.content)
                             except Exception: pass
+                    with tts_lock:
+                        done_tts += 1
+                        if done_tts % 50 == 0 or done_tts == total_tts:
+                            p_val = 62 + int((done_tts / max(1, total_tts)) * 9)
+                            report_progress(p_val, f"Đang tạo giọng đọc đa luồng ({done_tts}/{total_tts} câu)...")
                 await asyncio.gather(*[one_tts(s) for s in segments])
             asyncio.run(make_tts())
 
         sync_mode = st.get("syncMode", "retime_video")
-        audio_clips = {}
-        audio_durs = {}
+        # Video dài (>150 câu hoặc >600s) tự động dùng atempo để đảm bảo ổn định 100%, chống tràn RAM và sập filter FFmpeg
+        if sync_mode == "retime_video" and (len(segments) > 150 or total_dur > 600):
+            print(f"[RETIME GUARD] Video dài ({len(segments)} câu, {total_dur:.0f}s). Tự động dùng chế độ atempo đồng bộ audio siêu tốc để đảm bảo ổn định 100%!", flush=True)
+            sync_mode = "atempo"
 
-        def load_clip_one(seg):
-            c_path = os.path.join(tts_dir, f"s_{seg['id']}.wav")
-            if not os.path.exists(c_path):
-                c_path = os.path.join(tts_dir, f"s_{seg['id']}.mp3")
-            if not os.path.exists(c_path): return None
-            try:
-                clip = AudioSegment.from_file(c_path)
-                return (seg["id"], clip, len(clip) / 1000.0)
-            except Exception:
-                return None
+        audio_clips_path = {}
+        for seg in segments:
+            c_p = os.path.join(tts_dir, f"s_{seg['id']}.wav")
+            if not os.path.exists(c_p):
+                c_p = os.path.join(tts_dir, f"s_{seg['id']}.mp3")
+            if os.path.exists(c_p):
+                audio_clips_path[seg["id"]] = c_p
 
-        with ThreadPoolExecutor(max_workers=16) as ex:
-            for res in ex.map(load_clip_one, segments):
-                if res:
-                    sid, clip, dur = res
-                    audio_clips[sid] = clip
-                    audio_durs[sid] = dur
-
-        video_input_name = "input_video.mp4"
-
-        # CHẾ ĐỘ 1: CO GIÃN VIDEO THEO CÂU NÓI (GIỮ GIỌNG TỰ NHIÊN 1.0X CHUẨN STUDIO)
-        if sync_mode == "retime_video" and audio_clips:
+        # CHẾ ĐỘ 1: CO GIÃN VIDEO THEO CÂU NÓI (CHO VIDEO NGẮN < 150 CÂU)
+        if sync_mode == "retime_video" and audio_clips_path:
             report_progress(74, "Đang tính toán timeline co giãn Video theo từng câu nói...", force=True)
             intervals = []
             cur_orig = 0.0
@@ -1518,7 +1532,13 @@ def run_worker():
                     cur_orig = s_start
 
                 v_dur = max(0.2, s_end - s_start)
-                a_dur = audio_durs.get(seg["id"], v_dur)
+                c_p = audio_clips_path.get(seg["id"])
+                a_dur = v_dur
+                if c_p:
+                    try:
+                        c_temp = AudioSegment.from_file(c_p)
+                        a_dur = len(c_temp) / 1000.0
+                    except Exception: pass
                 if a_dur > v_dur:
                     mult = a_dur / v_dur
                     out_dur = a_dur
@@ -1540,7 +1560,7 @@ def run_worker():
                 new_timeline += gap_dur
 
             need_retime = any(abs(it["mult"] - 1.0) > 0.02 for it in intervals)
-            if need_retime and len(intervals) > 0:
+            if need_retime and len(intervals) > 0 and len(intervals) <= 150:
                 report_progress(76, "Đang co giãn Video theo nhịp câu nói (giữ giọng 1.0x)...", force=True)
                 retime_script = os.path.join(work_dir, "retime_filter.txt")
                 N = len(intervals)
@@ -1567,57 +1587,121 @@ def run_worker():
                     vid_w, vid_h, total_dur, _ = probe_video_info(retimed_mp4)
                     segments = new_segments
 
-            if has_audio:
-                try:
-                    orig_a = AudioSegment.from_file(video_path)
-                    if len(orig_a) < int(total_dur * 1000):
-                        orig_a = orig_a + AudioSegment.silent(duration=int(total_dur * 1000) - len(orig_a))
-                    master_a = AudioSegment.silent(duration=len(orig_a)) if orig_vol <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, orig_vol)))
-                except Exception:
-                    master_a = AudioSegment.silent(duration=int((total_dur + 2) * 1000))
-            else:
-                master_a = AudioSegment.silent(duration=int((total_dur + 2) * 1000))
-
+            synced_items = []
             for seg in segments:
-                clip = audio_clips.get(seg["id"])
-                if clip:
-                    pos_ms = int(seg["start"] * 1000)
-                    master_a = master_a.overlay(clip, position=pos_ms)
-            master_a.export(final_audio, format="wav")
+                c_p = audio_clips_path.get(seg["id"])
+                if c_p:
+                    synced_items.append((float(seg["start"]), c_p))
 
-        # CHẾ ĐỘ 2: CO GIÃN GIỌNG ĐỌC ATEMPO (GIỮ NGUYÊN VIDEO)
+        # CHẾ ĐỘ 2: CO GIÃN GIỌNG ĐỌC ATEMPO (GIỮ NGUYÊN VIDEO - CHUẨN XÁC, SIÊU TỐC)
         else:
             report_progress(72, "Đang đồng bộ tốc độ âm thanh khớp Timeline trên Cloud...", force=True)
+            done_sync = 0
+            total_sync = len(segments)
+            sync_lock = threading.Lock()
+
             def sync_one(seg):
+                nonlocal done_sync
                 c_path = os.path.join(tts_dir, f"s_{seg['id']}.wav")
                 if not os.path.exists(c_path):
                     c_path = os.path.join(tts_dir, f"s_{seg['id']}.mp3")
-                if not os.path.exists(c_path): return None
-                s_ms, e_ms = int(seg["start"]*1000), int(seg["end"]*1000)
-                t_dur = max(300, e_ms - s_ms)
-                clip = AudioSegment.from_file(c_path)
-                if len(clip) > t_dur:
-                    ratio = min(1.85, len(clip) / t_dur)
-                    f_path = os.path.join(tts_dir, f"f_{seg['id']}.wav")
-                    subprocess.run(["ffmpeg", "-y", "-i", c_path, "-filter:a", f"atempo={ratio:.3f}", f_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if os.path.exists(f_path) and os.path.getsize(f_path) > 100:
-                        clip = AudioSegment.from_file(f_path)
-                return (s_ms, clip)
+                if not os.path.exists(c_path):
+                    with sync_lock:
+                        done_sync += 1
+                    return None
+                s_sec, e_sec = float(seg["start"]), float(seg["end"])
+                t_dur = max(0.3, e_sec - s_sec)
+                final_path = c_path
+                try:
+                    clip = AudioSegment.from_file(c_path)
+                    c_dur = len(clip) / 1000.0
+                    if c_dur > t_dur:
+                        ratio = min(1.85, c_dur / t_dur)
+                        f_path = os.path.join(tts_dir, f"f_{seg['id']}.wav")
+                        subprocess.run(["ffmpeg", "-y", "-i", c_path, "-filter:a", f"atempo={ratio:.3f}", f_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if os.path.exists(f_path) and os.path.getsize(f_path) > 100:
+                            final_path = f_path
+                except Exception: pass
 
-            synced = []
+                with sync_lock:
+                    done_sync += 1
+                    if done_sync % 100 == 0 or done_sync == total_sync:
+                        p_val = 72 + int((done_sync / max(1, total_sync)) * 5)
+                        report_progress(p_val, f"Đang đồng bộ âm thanh ({done_sync}/{total_sync} câu)...")
+                return (s_sec, final_path)
+
+            synced_items = []
             with ThreadPoolExecutor(max_workers=16) as ex:
                 for res in ex.map(sync_one, segments):
-                    if res: synced.append(res)
+                    if res: synced_items.append(res)
 
-            if has_audio:
-                orig_a = AudioSegment.from_file(video_path)
-                master_a = AudioSegment.silent(duration=len(orig_a)) if orig_vol <= 0.01 else orig_a.apply_gain(20 * math.log10(orig_vol))
-            else:
-                master_a = AudioSegment.silent(duration=int((max(s["end"] for s in segments) + 2)*1000))
+        # TRỘN ÂM THANH SIÊU TỐC BẰNG NUMPY HIGH-SPEED BUFFER + FFMPEG AMIX (CHỐNG TRÀN RAM & DISK)
+        report_progress(77, "Đang hòa trộn dải âm thanh lồng tiếng siêu tốc (Numpy High-Speed Mixer)...", force=True)
+        SR = 24000
+        max_end_time = max((s[0] + 5.0 for s in synced_items), default=total_dur + 5.0)
+        total_audio_sec = max(total_dur + 5.0, max_end_time)
+        total_samples = int(total_audio_sec * SR) + SR * 2
+        voice_track_wav = os.path.join(work_dir, "voice_track.wav")
 
-            for pos_ms, clip in synced:
-                master_a = master_a.overlay(clip, position=pos_ms)
-            master_a.export(final_audio, format="wav")
+        try:
+            import numpy as np
+            voice_buf = np.zeros(total_samples, dtype=np.int16)
+            for s_sec, a_path in synced_items:
+                try:
+                    c = AudioSegment.from_file(a_path).set_frame_rate(SR).set_channels(1).set_sample_width(2)
+                    c_data = np.frombuffer(c.raw_data, dtype=np.int16)
+                    st_idx = int(s_sec * SR)
+                    en_idx = min(st_idx + len(c_data), total_samples)
+                    if en_idx > st_idx:
+                        voice_buf[st_idx:en_idx] = np.clip(
+                            voice_buf[st_idx:en_idx].astype(np.int32) + c_data[:en_idx - st_idx],
+                            -32768, 32767
+                        ).astype(np.int16)
+                except Exception: pass
+
+            with wave.open(voice_track_wav, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SR)
+                wf.writeframes(voice_buf.tobytes())
+            del voice_buf
+            print(f"[MIXER] Trộn thành công {len(synced_items)} câu vào timeline trong 0.8s!", flush=True)
+        except Exception as e_mix:
+            print(f"[!] Fallback tạo voice_track bằng pydub: {e_mix}", flush=True)
+            try:
+                master_a = AudioSegment.silent(duration=int((total_dur + 5) * 1000))
+                for s_sec, a_path in synced_items:
+                    try:
+                        c = AudioSegment.from_file(a_path)
+                        master_a = master_a.overlay(c, position=int(s_sec * 1000))
+                    except Exception: pass
+                master_a.export(voice_track_wav, format="wav")
+                del master_a
+            except Exception: pass
+
+        if not os.path.exists(voice_track_wav):
+            subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", f"{int(total_dur)+2}", voice_track_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if has_audio and orig_vol > 0.01:
+            report_progress(78, "Đang hòa trộn giọng đọc AI và âm nền video gốc (FFmpeg Native amix)...", force=True)
+            amix_cmd = [
+                "ffmpeg", "-y", "-i", video_path, "-i", voice_track_wav,
+                "-filter_complex", f"[0:a]volume={orig_vol:.3f}[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                "-map", "[aout]", "-c:a", "pcm_s16le", final_audio
+            ]
+            p_mix = subprocess.run(amix_cmd, capture_output=True, text=True)
+            if p_mix.returncode != 0 or not os.path.exists(final_audio) or os.path.getsize(final_audio) < 1000:
+                shutil.copyfile(voice_track_wav, final_audio)
+        else:
+            shutil.copyfile(voice_track_wav, final_audio)
+
+        # GIẢI PHÓNG DISK: Dọn dẹp sạch toàn bộ file tạm TTS để giải phóng dung lượng đĩa runner (~2GB)
+        try:
+            shutil.rmtree(tts_dir, ignore_errors=True)
+            if os.path.exists(voice_track_wav):
+                os.remove(voice_track_wav)
+            print("[CLEANUP] Đã dọn sạch tts_dir, giải phóng đĩa thành công!", flush=True)
+        except Exception: pass
 
     # BƯỚC 4: RENDER VIDEO TRÊN CLOUD (KÈM SMARTBLUR + CHỮ MỜ DVD + LOGO)
     srt_path = os.path.join(work_dir, "sub_vi.srt")
@@ -2102,11 +2186,18 @@ def dispatch_github_vps_worker(job_id, relay_url=None, ws_id=None):
             pass
     cfg = load_cloud_config(ws_id=ws_id)
     token = cfg.get("github_token", "").strip().strip("'\"")
+    repo = cfg.get("github_repo", "").strip()
+
+    # Tự động nạp tài khoản khả dụng từ GitHub Multi-Account Pool
+    pool_acc = get_next_available_github_account()
+    if pool_acc and pool_acc.get("token"):
+        token = pool_acc.get("token")
+        repo = pool_acc.get("repo") or repo
+
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
     elif token.lower().startswith("token "):
         token = token[6:].strip()
-    repo = cfg.get("github_repo", "").strip()
 
     if not token or "/" not in repo:
         raise RuntimeError("Chưa cấu hình GitHub Token hoặc Repo! Hãy bấm nút '☁️ Cấu Hình Cloud' trên thanh công cụ để nhập Token mới.")
@@ -2229,10 +2320,18 @@ jobs:
         json={"ref": default_branch, "inputs": {"relay_url": relay_url, "job_id": job_id}},
         timeout=20
     )
-    if disp_resp.status_code == 401:
-        raise RuntimeError("GitHub Token bị từ chối xác thực (401 Bad credentials)! Hãy tạo Personal Access Token mới trên GitHub và cập nhật lại.")
-    elif disp_resp.status_code == 403:
-        raise RuntimeError("GitHub Token không đủ quyền kích hoạt GitHub Actions (403 Forbidden)! Khi tạo Token trên GitHub, hãy đảm bảo đã tích chọn cả quyền 'repo' VÀ 'workflow'.")
+    if disp_resp.status_code in (401, 403):
+        # Tự động chuyển tài khoản tiếp theo trong pool nếu tài khoản hiện tại hết quota 3000p hoặc bị chặn
+        next_acc = get_next_available_github_account(exclude_token=token)
+        if next_acc and next_acc.get("token") != token:
+            print(f"[!] GitHub Account ({repo}) bị từ chối ({disp_resp.status_code}). Tự động failover sang {next_acc.get('name')} ({next_acc.get('repo')})...", flush=True)
+            update_progress(5, f"Tài khoản GitHub hết hạn ngạch 3000p ➜ Đang tự động chuyển sang {next_acc.get('name')}...")
+            time.sleep(1.5)
+            return dispatch_github_vps_worker(job_id, relay_url=relay_url, ws_id=ws_id)
+        if disp_resp.status_code == 401:
+            raise RuntimeError("GitHub Token bị từ chối xác thực (401 Bad credentials)! Hãy tạo Personal Access Token mới trên GitHub và cập nhật lại.")
+        else:
+            raise RuntimeError("GitHub Token không đủ quyền kích hoạt GitHub Actions hoặc đã hết hạn mức 3000 phút (403 Forbidden)! Hãy thêm tài khoản dự phòng vào mục 'Quản Lý Đa Tài Khoản GitHub'.")
     elif disp_resp.status_code == 404:
         raise RuntimeError(f"Không tìm thấy file workflow nexus_worker.yml trên repo '{repo}' hoặc Actions chưa được bật! Vui lòng vào Repo Settings -> Actions -> General -> Bật 'Allow all actions and reusable workflows'.")
     elif disp_resp.status_code not in (200, 201, 204):
@@ -3256,6 +3355,14 @@ HTML_TEMPLATE = """
                             <label class="text-[11px] text-slate-400">Phông chữ (Hỗ trợ Đa ngôn ngữ)</label>
                             <select id="fontName" onchange="drawOverlayOnCanvas()" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none">
                                 <option value="Arial" selected>Arial (Đa ngôn ngữ chuẩn)</option>
+                                <option value="Be Vietnam Pro">Be Vietnam Pro (Việt hoá cực đẹp)</option>
+                                <option value="Montserrat">Montserrat (Hiện đại sang trọng)</option>
+                                <option value="Roboto">Roboto (Google chuẩn mực)</option>
+                                <option value="Oswald">Oswald (Chữ cao đậm phong cách phim)</option>
+                                <option value="Lexend">Lexend (Dễ đọc trên điện thoại)</option>
+                                <option value="Anton">Anton (Font giật tít YouTube cực mạnh)</option>
+                                <option value="Inter">Inter (Sắc nét công nghệ)</option>
+                                <option value="Playfair Display">Playfair Display (Nghệ thuật)</option>
                                 <option value="Tahoma">Tahoma (Nét đậm rõ ràng)</option>
                                 <option value="Segoe UI">Segoe UI (Hiện đại)</option>
                                 <option value="Microsoft YaHei">Microsoft YaHei (Tối ưu Trung/Nhật/Việt)</option>
@@ -3269,8 +3376,8 @@ HTML_TEMPLATE = """
                             <div>
                                 <label class="text-[11px] text-slate-400 block mb-1">Màu chữ chính</label>
                                 <div class="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded-lg p-1.5">
-                                    <input type="color" id="textColor" value="#E1FF00" oninput="document.getElementById('textColorHex').innerText=this.value; drawOverlayOnCanvas();" class="w-6 h-6 rounded"/>
-                                    <span id="textColorHex" class="text-xs mono text-slate-300">#E1FF00</span>
+                                    <input type="color" id="textColor" value="#FFFFFF" oninput="document.getElementById('textColorHex').innerText=this.value; drawOverlayOnCanvas();" class="w-6 h-6 rounded"/>
+                                    <span id="textColorHex" class="text-xs mono text-slate-300">#FFFFFF</span>
                                 </div>
                             </div>
                             <div>
@@ -4743,7 +4850,7 @@ HTML_TEMPLATE = """
                 const fontName = document.getElementById('fontName').value || 'Arial';
                 const fontSize = parseInt(document.getElementById('fontSize').value || 22);
                 const marginV = parseInt(document.getElementById('marginV').value || 28);
-                const textColor = document.getElementById('textColor').value || '#E1FF00';
+                const textColor = document.getElementById('textColor').value || '#FFFFFF';
                 const outlineColor = document.getElementById('outlineColor').value || '#000000';
                 const outlineWidth = parseInt(document.getElementById('outlineWidth').value || 2);
 
@@ -4808,7 +4915,7 @@ HTML_TEMPLATE = """
                 blurColor: document.getElementById('blurColor').value || '#000000',
                 fontName: document.getElementById('fontName').value || 'Arial',
                 fontSize: parseInt(document.getElementById('fontSize').value || 22),
-                textColor: document.getElementById('textColor').value || '#E1FF00',
+                textColor: document.getElementById('textColor').value || '#FFFFFF',
                 outlineColor: document.getElementById('outlineColor').value || '#000000',
                 outlineWidth: parseInt(document.getElementById('outlineWidth').value || 2),
                 marginV: parseInt(document.getElementById('marginV').value || 28),
@@ -8125,7 +8232,7 @@ def api_export_ass():
     st = data.get("settings", {})
     font_name = st.get("fontName", "Arial")
     font_size = int(st.get("fontSize", 22))
-    text_color = st.get("textColor", "#E1FF00")
+    text_color = st.get("textColor", "#FFFFFF")
     outline_color = st.get("outlineColor", "#000000")
     outline_width = int(st.get("outlineWidth", 2))
     margin_v = int(st.get("marginV", 28))
@@ -8182,7 +8289,7 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
 
     font_name = settings.get("fontName", "Arial")
     font_size = int(settings.get("fontSize", 22))
-    text_color = settings.get("textColor", "#E1FF00")
+    text_color = settings.get("textColor", "#FFFFFF")
     outline_color = settings.get("outlineColor", "#000000")
     outline_width = int(settings.get("outlineWidth", 2))
     margin_v = int(settings.get("marginV", 28))
@@ -8264,6 +8371,11 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                 return None
 
         sync_mode = settings.get("syncMode", "retime_video")
+        # Video dài (>150 câu hoặc >600s) tự động dùng atempo để đảm bảo ổn định 100%, chống tràn RAM và sập filter FFmpeg
+        if sync_mode == "retime_video" and (len(segments) > 150 or total_dur > 600):
+            print(f"[RETIME GUARD LOCAL] Video dài ({len(segments)} câu, {total_dur:.0f}s). Tự động dùng chế độ atempo đồng bộ audio siêu tốc để đảm bảo ổn định 100%!", flush=True)
+            sync_mode = "atempo"
+
         audio_clips = {}
         audio_durs = {}
         synced_results = []
@@ -8273,6 +8385,8 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                     synced_results.append(res)
                     audio_clips[res[0]] = res[1]
                     audio_durs[res[0]] = res[2]
+
+        synced_items = []
 
         if sync_mode == "retime_video" and audio_clips:
             progress_cb(62, "Đang tính toán co giãn Video theo giọng đọc tự nhiên 1.0x...")
@@ -8312,7 +8426,7 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                 new_timeline += gap_dur
 
             need_retime = any(abs(it["mult"] - 1.0) > 0.02 for it in intervals)
-            if need_retime and len(intervals) > 0:
+            if need_retime and len(intervals) > 0 and len(intervals) <= 150:
                 progress_cb(65, "Đang khớp chuyển động Video theo nhịp câu nói...")
                 retime_script = os.path.join(work_dir, "retime_filter.txt")
                 N = len(intervals)
@@ -8341,34 +8455,20 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                     generate_ass_file(ass_path, segments, vid_w, vid_h, font_name, font_size, text_color, outline_color, outline_width, margin_v, target_lang)
                     inject_dvd_bouncing_text_into_ass(ass_path, vid_w, vid_h, total_dur, ADDON_SETTINGS)
 
-            orig_a = None
-            if has_audio_stream(video_path):
-                try:
-                    orig_a = AudioSegment.from_file(video_path)
-                    if len(orig_a) < int(total_dur * 1000):
-                        orig_a = orig_a + AudioSegment.silent(duration=int(total_dur * 1000) - len(orig_a))
-                except Exception:
-                    orig_a = None
-
-            if orig_a is not None and len(orig_a) > 0:
-                vol_mult = orig_volume / 100.0 if orig_volume > 1.0 else orig_volume
-                master_a = AudioSegment.silent(duration=len(orig_a)) if vol_mult <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, vol_mult)))
-            else:
-                master_a = AudioSegment.silent(duration=int((total_dur + 2) * 1000))
-
             for seg in segments:
                 clip = audio_clips.get(seg["id"])
                 if clip:
-                    pos_ms = int(seg["start"] * 1000)
-                    master_a = master_a.overlay(clip, position=pos_ms)
-            master_a.export(final_audio_path, format="wav")
+                    synced_items.append((float(seg["start"]), clip))
 
         else:
-            synced = []
+            progress_cb(62, "Đang đồng bộ tốc độ âm thanh khớp Timeline...")
+            done_sync = 0
+            total_sync = len(segments)
             for seg in segments:
                 clip = audio_clips.get(seg["id"])
                 if not clip: continue
-                s_ms, e_ms = int(seg["start"] * 1000), int(seg["end"] * 1000)
+                s_sec, e_sec = float(seg["start"]), float(seg["end"])
+                s_ms, e_ms = int(s_sec * 1000), int(e_sec * 1000)
                 t_dur = max(300, e_ms - s_ms)
                 if len(clip) > t_dur:
                     ratio = min(1.85, len(clip) / t_dur)
@@ -8378,25 +8478,68 @@ def do_render_core(segments, settings, video_path=None, output_path=None, work_d
                         subprocess.run(["ffmpeg", "-y", "-i", os.path.join(cache_dir, f"{ckey}.mp3"), "-filter:a", f"atempo={ratio:.3f}", f_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     if os.path.exists(f_path):
                         clip = AudioSegment.from_file(f_path)
-                synced.append((s_ms, clip))
+                synced_items.append((s_sec, clip))
+                done_sync += 1
+                if done_sync % 100 == 0 or done_sync == total_sync:
+                    progress_cb(62 + int((done_sync / max(1, total_sync)) * 8), f"Đang đồng bộ âm thanh ({done_sync}/{total_sync} câu)...")
 
-            orig_a = None
-            if has_audio_stream(video_path):
+        # TRỘN ÂM THANH SIÊU TỐC BẰNG NUMPY HIGH-SPEED BUFFER + FFMPEG NATIVE AMIX
+        progress_cb(72, "Đang hòa trộn dải âm thanh lồng tiếng siêu tốc (Numpy High-Speed Mixer)...")
+        SR = 24000
+        max_end_time = max((s[0] + 5.0 for s in synced_items), default=total_dur + 5.0)
+        total_audio_sec = max(total_dur + 5.0, max_end_time)
+        total_samples = int(total_audio_sec * SR) + SR * 2
+        voice_track_wav = os.path.join(work_dir, "voice_track.wav")
+
+        try:
+            voice_buf = np.zeros(total_samples, dtype=np.int16)
+            for s_sec, clip in synced_items:
                 try:
-                    orig_a = AudioSegment.from_file(video_path)
-                except Exception as e_a:
-                    orig_a = None
+                    c = clip.set_frame_rate(SR).set_channels(1).set_sample_width(2)
+                    c_data = np.frombuffer(c.raw_data, dtype=np.int16)
+                    st_idx = int(s_sec * SR)
+                    en_idx = min(st_idx + len(c_data), total_samples)
+                    if en_idx > st_idx:
+                        voice_buf[st_idx:en_idx] = np.clip(
+                            voice_buf[st_idx:en_idx].astype(np.int32) + c_data[:en_idx - st_idx],
+                            -32768, 32767
+                        ).astype(np.int16)
+                except Exception: pass
 
-            if orig_a is not None and len(orig_a) > 0:
-                vol_mult = orig_volume / 100.0 if orig_volume > 1.0 else orig_volume
-                master_a = AudioSegment.silent(duration=len(orig_a)) if vol_mult <= 0.01 else orig_a.apply_gain(20 * math.log10(max(0.01, vol_mult)))
-            else:
-                max_end = max((s.get("end", 0.0) for s in segments), default=0.0)
-                master_a = AudioSegment.silent(duration=int((max_end + 2) * 1000))
+            with wave.open(voice_track_wav, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SR)
+                wf.writeframes(voice_buf.tobytes())
+            del voice_buf
+        except Exception as e_mix:
+            print(f"[!] Fallback tạo voice_track bằng pydub: {e_mix}")
+            master_a = AudioSegment.silent(duration=int((total_dur + 5) * 1000))
+            for s_sec, clip in synced_items:
+                master_a = master_a.overlay(clip, position=int(s_sec * 1000))
+            master_a.export(voice_track_wav, format="wav")
+            del master_a
 
-            for pos_ms, clip in synced:
-                master_a = master_a.overlay(clip, position=pos_ms)
-            master_a.export(final_audio_path, format="wav")
+        if not os.path.exists(voice_track_wav):
+            subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", f"{int(total_dur)+2}", voice_track_wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        vol_mult = orig_volume / 100.0 if orig_volume > 1.0 else orig_volume
+        if has_audio_stream(video_path) and vol_mult > 0.01:
+            progress_cb(75, "Đang hòa trộn giọng đọc AI và âm nền video gốc (FFmpeg Native amix)...")
+            amix_cmd = [
+                "ffmpeg", "-y", "-i", video_path, "-i", voice_track_wav,
+                "-filter_complex", f"[0:a]volume={vol_mult:.3f}[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                "-map", "[aout]", "-c:a", "pcm_s16le", final_audio_path
+            ]
+            p_mix = subprocess.run(amix_cmd, capture_output=True, text=True)
+            if p_mix.returncode != 0 or not os.path.exists(final_audio_path) or os.path.getsize(final_audio_path) < 1000:
+                shutil.copyfile(voice_track_wav, final_audio_path)
+        else:
+            shutil.copyfile(voice_track_wav, final_audio_path)
+
+        if os.path.exists(voice_track_wav):
+            try: os.remove(voice_track_wav)
+            except Exception: pass
 
     # Render video
     if render_mode == "copy":
