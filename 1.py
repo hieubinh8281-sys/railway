@@ -7446,21 +7446,30 @@ def api_download_video_from_url():
                 return jsonify({"ok": False, "error": f"Máy chủ Railway chưa có thư viện 'yt-dlp' và không thể tự cài ({pe}). Vui lòng thêm dòng 'yt-dlp>=2024.0.0' vào file requirements.txt trên GitHub Railway rồi bấm Redeploy!"}), 500
 
         target_template = os.path.join(ws_dir, "dl_temp.%(ext)s")
-        referer = 'https://www.bilibili.com/' if any(x in url.lower() for x in ['bilibili.com', 'b23.tv']) else 'https://www.google.com/'
+        is_bili = any(x in url.lower() for x in ['bilibili.com', 'b23.tv'])
+        req_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,vi;q=0.7'
+        }
+        if is_bili:
+            req_headers['Referer'] = 'https://www.bilibili.com/'
+            # Header Range: bytes=0- là BẮT BUỘC để vượt qua tường lửa Tencent CDN (chống lỗi HTTP Error 567)
+            req_headers['Range'] = 'bytes=0-'
+        else:
+            req_headers['Referer'] = 'https://www.google.com/'
+
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+            'format': 'bestvideo+bestaudio/best',
             'outtmpl': target_template,
             'merge_output_format': 'mp4',
             'overwrites': True,
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-                'Referer': referer,
-                'Accept': '*/*',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,vi;q=0.7'
-            }
+            'retries': 10,
+            'fragment_retries': 10,
+            'http_headers': req_headers
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
