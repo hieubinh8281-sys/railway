@@ -206,9 +206,9 @@ def auto_detect_smartblur_fullrow(video_path, scan_minutes=4.0, pad_y=14, progre
                 active_frames += 1
 
     if active_frames < 2 or np.max(row_energy_accum) <= 0:
-        # Dự phòng nếu video ít sub ở đầu: lấy dải phụ đề tiêu chuẩn ở đáy màn hình
-        default_h = int(vid_h * 0.14) // 2 * 2
-        default_y = int(vid_h * 0.80) // 2 * 2
+        # Dự phòng nếu video ít sub ở đầu: lấy dải phụ đề tiêu chuẩn bao trọn 74% -> 92% chiều cao video
+        default_h = int(vid_h * 0.18) // 2 * 2
+        default_y = int(vid_h * 0.74) // 2 * 2
         return {
             "x": 0,
             "y": default_y,
@@ -217,7 +217,7 @@ def auto_detect_smartblur_fullrow(video_path, scan_minutes=4.0, pad_y=14, progre
             "vid_w": vid_w,
             "vid_h": vid_h,
             "detected_frames": active_frames,
-            "note": "Áp dụng dải che mờ toàn hàng tiêu chuẩn"
+            "note": "Áp dụng dải che mờ toàn hàng tiêu chuẩn (74%-92%)"
         }
 
     # Làm mượt biểu đồ năng lượng theo trục dọc để tìm đỉnh dòng chữ
@@ -236,11 +236,13 @@ def auto_detect_smartblur_fullrow(video_path, scan_minutes=4.0, pad_y=14, progre
     while bot_idx < roi_h - 1 and smoothed[bot_idx] >= threshold:
         bot_idx += 1
 
-    real_y1 = max(0, (y_top_bound + top_idx) - int(pad_y))
-    real_y2 = min(vid_h, (y_top_bound + bot_idx) + int(pad_y))
+    # Mở rộng dải đệm pad_y tối thiểu 22px để ôm trọn cả dấu chữ và phụ đề 2 dòng
+    eff_pad = max(int(pad_y), 22)
+    real_y1 = max(0, (y_top_bound + top_idx) - eff_pad)
+    real_y2 = min(vid_h, (y_top_bound + bot_idx) + eff_pad)
 
-    # Đảm bảo chiều cao tối thiểu đủ che chữ và làm tròn số chẵn cho FFmpeg
-    min_band_h = max(36, int(vid_h * 0.085))
+    # Đảm bảo chiều cao tối thiểu của dải che mờ ít nhất 16% chiều cao video (đủ che trọn phụ đề to)
+    min_band_h = max(50, int(vid_h * 0.16))
     if (real_y2 - real_y1) < min_band_h:
         center_y = (real_y1 + real_y2) // 2
         real_y1 = max(0, center_y - min_band_h // 2)
@@ -262,7 +264,7 @@ def auto_detect_smartblur_fullrow(video_path, scan_minutes=4.0, pad_y=14, progre
         "vid_w": vid_w,
         "vid_h": vid_h,
         "detected_frames": active_frames,
-        "note": f"Đã quét {active_frames} phân cảnh có sub và khóa kín toàn bộ hàng ngang!"
+        "note": f"Đã khóa dải SmartBlur (Y={by}, Cao={bh})"
     }
 
 
