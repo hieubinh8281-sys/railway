@@ -6319,6 +6319,26 @@ HTML_TEMPLATE = """
 
             if (typeof syncAddonSettings === 'function') await syncAddonSettings();
 
+            // ========== TỰ ĐỘNG KÍCH HOẠT SMARTBLUR QUÉT CHE PHỤ ĐỀ GỐC KHI BẤM A → Z ==========
+            // Nếu người dùng chưa vẽ tay vùng mờ, hệ thống sẽ tự động bấm nút SmartBlur để quét & khóa vùng mờ phụ đề gốc
+            const hasManualBlur = (typeof blurAreas !== 'undefined' && blurAreas && blurAreas.length > 0) || (typeof blurRect !== 'undefined' && blurRect && blurRect.w > 0);
+            if (!hasManualBlur) {
+                setStatus(10, "🔍 Đang tự động quét vị trí SmartBlur che phụ đề gốc...");
+                try {
+                    if (typeof runAutoSmartBlur === 'function') {
+                        await runAutoSmartBlur();
+                    } else {
+                        const btnSb = document.getElementById('btnSmartBlur');
+                        if (btnSb) {
+                            btnSb.click();
+                            await new Promise(r => setTimeout(r, 2000));
+                        }
+                    }
+                } catch (sbErr) {
+                    console.warn("Auto SmartBlur notice:", sbErr);
+                }
+            }
+
             // KHỞI CHẠY TIẾN TRÌNH 24/7 TRÊN TRẠM TRUNG CHUYỂN:
             // Trạm Trung Chuyển (Railway) sẽ điều phối Job sang GitHub Actions VPS (hoặc Kaggle GPU)
             const btn = document.getElementById('btnAutoAll');
