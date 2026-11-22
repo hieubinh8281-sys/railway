@@ -3852,7 +3852,7 @@ HTML_TEMPLATE = """
 
     <!-- MODAL CẤU HÌNH CLOUD WORKER -->
     <div id="cloudModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
-        <div class="studio-panel rounded-2xl max-w-2xl w-full p-5 space-y-4 border border-slate-700">
+        <div class="studio-panel rounded-2xl max-w-4xl w-full p-5 space-y-4 border border-slate-700 max-h-[92vh] overflow-y-auto">
             <div class="flex items-center justify-between border-b border-slate-800 pb-3">
                 <h3 class="text-sm font-extrabold text-white flex items-center gap-2">
                     <i class="fa-solid fa-satellite-dish text-sky-400"></i> Cấu Hình Trạm Điều Phối Cloud Worker (Tự bật & Tự ngắt phiên)
@@ -3893,25 +3893,73 @@ HTML_TEMPLATE = """
                 </div>
 
                 <div class="studio-card rounded-xl p-3.5 space-y-3">
-                    <span class="text-xs font-extrabold text-purple-400 uppercase block"><i class="fa-brands fa-github mr-1"></i>2. GitHub VPS 6h (Actions / Workspace)</span>
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-extrabold text-purple-400 uppercase flex items-center gap-1.5">
+                            <i class="fa-brands fa-github text-purple-400"></i> 2. GitHub VPS 6h - Đa Tài Khoản (3000p/Acc)
+                        </span>
+                        <span class="text-[10px] text-emerald-300 bg-emerald-950/60 border border-emerald-500/40 px-2 py-0.5 rounded font-mono font-bold">
+                            Auto-Failover 24/7
+                        </span>
+                    </div>
                     <p class="text-[11px] text-slate-400 leading-relaxed">
-                        Tạo Token tại <b>GitHub Settings $\rightarrow$ Developer settings $\rightarrow$ Personal access tokens (Classic)</b> (tích quyền <code>repo</code>, <code>workflow</code>, <code>codespace</code>).
+                        Mỗi tài khoản GitHub có <b>3.000 phút</b> VPS 6h miễn phí mỗi tháng. Toàn bộ tool sẽ <b>tự động luân phiên tài khoản</b> khi hết quota 3000p hoặc lỗi 403 (áp dụng cho Tự Động A-Z, Tách Sub, Dịch, Render & Đăng YouTube).
                     </p>
-                    <div>
-                        <label class="text-[11px] text-slate-300">GitHub Personal Access Token</label>
-                        <input type="password" id="cfg_gh_token" autocomplete="new-password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-emerald-300 mono outline-none"/>
+
+                    <!-- Danh sách tài khoản trong Pool -->
+                    <div class="space-y-1.5">
+                        <div class="flex items-center justify-between text-[11px] text-slate-300 font-bold">
+                            <span>Danh Sách Tài Khoản GitHub Trong Pool:</span>
+                            <span id="ghPoolCountBadge" class="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300">0 tài khoản</span>
+                        </div>
+                        <div id="ghPoolListContainer" class="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                            <!-- JS render các tài khoản ở đây -->
+                        </div>
                     </div>
-                    <div>
-                        <label class="text-[11px] text-slate-300">Tên Repo Worker (username/repo)</label>
-                        <input type="text" id="cfg_gh_repo" autocomplete="off" placeholder="VD: nguyenvana/nexus-worker" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white mono outline-none"/>
+
+                    <!-- Form Thêm Tài Khoản Nhanh -->
+                    <div class="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 space-y-2">
+                        <span class="text-[11px] font-bold text-slate-200 block">+ Thêm Tài Khoản GitHub Mới:</span>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            <div>
+                                <label class="text-[10px] text-slate-400">Token (Classic 'repo', 'workflow')</label>
+                                <input type="password" id="gh_new_token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" class="w-full mt-0.5 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-emerald-300 mono outline-none"/>
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-slate-400">Tên Repo Worker (username/repo)</label>
+                                <input type="text" id="gh_new_repo" placeholder="VD: user/nexus-worker" class="w-full mt-0.5 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white mono outline-none"/>
+                            </div>
+                        </div>
+                        <div class="flex gap-2">
+                            <input type="text" id="gh_new_name" placeholder="Tên gợi nhớ (VD: TK Phụ 1 - 3000p)" class="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 outline-none"/>
+                            <button type="button" onclick="addGitHubAccountToPool()" class="px-3 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition flex items-center gap-1">
+                                <i class="fa-solid fa-plus"></i> Thêm Vào Pool
+                            </button>
+                        </div>
                     </div>
-                    <div>
-                        <label class="text-[11px] text-slate-300">Tên GitHub Codespace (Tùy chọn)</label>
-                        <input type="text" id="cfg_gh_codespace" autocomplete="off" placeholder="Để trống nếu dùng GitHub Actions VPS 6h tự động" class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 mono outline-none"/>
-                    </div>
+
+                    <!-- Khối Dán Hàng Loạt (Bulk Import) -->
                     <div class="pt-1">
-                        <button type="button" onclick="testGithubConnection()" id="btnTestGithub" class="w-full py-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 text-[11px] font-bold border border-purple-500/30 flex items-center justify-center gap-1.5 transition">
-                            <i class="fa-solid fa-plug-circle-check"></i> Kiểm Tra Kết Nối GitHub
+                        <button type="button" onclick="toggleBulkImportGitHub()" class="text-[11px] text-purple-400 hover:text-purple-300 font-semibold flex items-center gap-1">
+                            <i class="fa-solid fa-paste"></i> <span>📋 Dán Hàng Loạt Nhiều Tài Khoản (Bulk Import)</span>
+                        </button>
+                        <div id="ghBulkImportBox" class="hidden mt-2 space-y-1.5 p-2 rounded-lg bg-slate-950 border border-slate-800">
+                            <label class="text-[10px] text-slate-400 block">Dán danh sách token & repo (Mỗi dòng: <code>TOKEN | USERNAME/REPO | TÊN GỢI NHỚ</code>):</label>
+                            <textarea id="ghBulkText" rows="3" placeholder="ghp_token1 | user1/repo1 | Tài khoản 1&#10;ghp_token2 | user2/repo2 | Tài khoản 2" class="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-emerald-300 mono outline-none"></textarea>
+                            <div class="flex justify-end gap-2">
+                                <button type="button" onclick="toggleBulkImportGitHub()" class="px-2 py-1 rounded bg-slate-800 text-[11px] text-slate-400">Đóng</button>
+                                <button type="button" onclick="submitBulkImportGitHub()" class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-[11px] font-bold text-white">Nạp Danh Sách</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Các input ẩn để duy trì 100% tính tương thích ngược với code cũ -->
+                    <input type="hidden" id="cfg_gh_token"/>
+                    <input type="hidden" id="cfg_gh_repo"/>
+                    <input type="hidden" id="cfg_gh_codespace"/>
+
+                    <div class="pt-1">
+                        <button type="button" onclick="testCurrentActiveGithub()" id="btnTestGithub" class="w-full py-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 text-[11px] font-bold border border-purple-500/30 flex items-center justify-center gap-1.5 transition">
+                            <i class="fa-solid fa-plug-circle-check"></i> Kiểm Tra Kết Nối Tài Khoản Đang Kích Hoạt
                         </button>
                         <div id="githubTestResult" class="text-[11px] mt-1.5 hidden leading-tight p-2 rounded-lg bg-slate-950 border border-slate-800"></div>
                     </div>
@@ -4021,7 +4069,7 @@ HTML_TEMPLATE = """
 
     <!-- MODAL KHO DỰ ÁN -->
     <div id="projectsModal" class="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
-        <div class="studio-panel rounded-2xl max-w-2xl w-full p-5 space-y-4 border border-slate-700">
+        <div class="studio-panel rounded-2xl max-w-4xl w-full p-5 space-y-4 border border-slate-700 max-h-[92vh] overflow-y-auto">
             <div class="flex items-center justify-between border-b border-slate-800 pb-3">
                 <h3 class="text-sm font-bold text-white flex items-center gap-2">
                     <i class="fa-solid fa-folder-open text-amber-400"></i> Kho Dự Án Đã Lưu
@@ -4290,6 +4338,7 @@ HTML_TEMPLATE = """
 
         function openCloudModal() {
             loadCloudConfigToUI();
+            if (typeof loadGitHubPoolUI === 'function') loadGitHubPoolUI();
             document.getElementById('cloudModal').classList.remove('hidden');
             document.getElementById('cloudModal').classList.add('flex');
         }
@@ -4376,6 +4425,167 @@ HTML_TEMPLATE = """
                 btn.disabled = false;
             }
         }
+
+        // ==================== QUẢN LÝ ĐA TÀI KHOẢN GITHUB TOÀN DIỆN CHO TOOL ====================
+        async function loadGitHubPoolUI() {
+            try {
+                const res = await fetch('/api/github_pool/list');
+                const data = await res.json();
+                const container = document.getElementById('ghPoolListContainer');
+                const badge = document.getElementById('ghPoolCountBadge');
+                if (!container) return;
+                const accounts = data.accounts || [];
+                if (badge) badge.innerText = `${accounts.length} tài khoản`;
+                if (accounts.length === 0) {
+                    container.innerHTML = '<div class="text-[11px] text-slate-500 italic p-2 text-center border border-dashed border-slate-800 rounded-lg">Chưa có tài khoản nào trong pool. Hãy thêm tài khoản bên dưới!</div>';
+                    return;
+                }
+                let html = '';
+                accounts.forEach(acc => {
+                    const isActive = acc.status === 'active';
+                    const isExceeded = acc.status === 'quota_exceeded';
+                    const statusBadge = isActive 
+                        ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">Đang Dùng</span>'
+                        : (isExceeded 
+                            ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">Hết Quota 3000p</span>'
+                            : '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400">Dự Phòng</span>');
+                    const tokenMasked = acc.token ? (acc.token.substring(0, 7) + '••••••••' + acc.token.slice(-4)) : 'Chưa có token';
+                    html += `
+                    <div class="p-2 rounded-lg bg-slate-900 border ${isActive ? 'border-emerald-500/50 shadow-sm shadow-emerald-950' : 'border-slate-800'} flex items-center justify-between gap-2">
+                        <div class="min-w-0 flex-1">
+                            <div class="flex items-center gap-1.5">
+                                <span class="text-xs font-bold text-slate-200 truncate">${acc.name || 'Tài khoản GitHub'}</span>
+                                ${statusBadge}
+                            </div>
+                            <div class="text-[10px] text-slate-400 font-mono truncate mt-0.5">
+                                Repo: <span class="text-sky-300">${acc.repo || 'Chưa đặt repo'}</span> | Token: <span class="text-emerald-400">${tokenMasked}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-1 flex-shrink-0">
+                            ${!isActive ? `<button type="button" onclick="setActiveGitHubAccount('${acc.id}')" class="px-2 py-1 rounded bg-sky-600/30 hover:bg-sky-600 text-sky-200 hover:text-white text-[10px] font-bold transition" title="Chọn làm tài khoản chạy chính">Dùng</button>` : ''}
+                            <button type="button" onclick="testSingleGitHubAccount('${acc.id}', '${acc.token}', '${acc.repo}')" class="p-1 rounded bg-purple-600/30 hover:bg-purple-600 text-purple-200 hover:text-white text-[10px] transition" title="Kiểm tra kết nối"><i class="fa-solid fa-plug"></i></button>
+                            <button type="button" onclick="deleteGitHubAccountFromPool('${acc.id}')" class="p-1 rounded bg-rose-600/30 hover:bg-rose-600 text-rose-200 hover:text-white text-[10px] transition" title="Xóa tài khoản"><i class="fa-solid fa-trash"></i></button>
+                        </div>
+                    </div>`;
+                });
+                container.innerHTML = html;
+
+                // Đồng bộ tài khoản active vào các input ẩn để tương thích 100% với code cũ
+                const activeAcc = accounts.find(a => a.status === 'active') || accounts[0];
+                if (activeAcc) {
+                    const tokEl = document.getElementById('cfg_gh_token');
+                    const repEl = document.getElementById('cfg_gh_repo');
+                    if (tokEl) tokEl.value = activeAcc.token || '';
+                    if (repEl) repEl.value = activeAcc.repo || '';
+                }
+            } catch (e) {
+                console.error("loadGitHubPoolUI error:", e);
+            }
+        }
+
+        async function addGitHubAccountToPool() {
+            const token = document.getElementById('gh_new_token').value.trim();
+            const repo = document.getElementById('gh_new_repo').value.trim();
+            const name = document.getElementById('gh_new_name').value.trim();
+            if (!token || !repo || !repo.includes('/')) {
+                alert("Vui lòng nhập Token và Tên Repo hợp lệ (dạng username/repo)!");
+                return;
+            }
+            const res = await fetch('/api/github_pool/add', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({token, repo, name})
+            });
+            const d = await res.json();
+            if (d.status === 'ok') {
+                document.getElementById('gh_new_token').value = '';
+                document.getElementById('gh_new_repo').value = '';
+                document.getElementById('gh_new_name').value = '';
+                loadGitHubPoolUI();
+                alert("Đã thêm tài khoản GitHub vào Pool thành công!");
+            } else {
+                alert("Lỗi: " + d.message);
+            }
+        }
+
+        async function deleteGitHubAccountFromPool(id) {
+            if (!confirm("Bạn có chắc chắn muốn xóa tài khoản này khỏi Pool?")) return;
+            const res = await fetch('/api/github_pool/delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id})
+            });
+            loadGitHubPoolUI();
+        }
+
+        async function setActiveGitHubAccount(id) {
+            const res = await fetch('/api/github_pool/set_active', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id})
+            });
+            loadGitHubPoolUI();
+        }
+
+        async function testSingleGitHubAccount(id, token, repo) {
+            const resDiv = document.getElementById('githubTestResult');
+            resDiv.className = "text-[11px] mt-1.5 text-amber-400 font-semibold p-2 rounded-lg bg-slate-950 border border-slate-800";
+            resDiv.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang kiểm tra kết nối tài khoản...';
+            resDiv.classList.remove('hidden');
+            try {
+                const resp = await fetch('/api/github_pool/test', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({token, repo})
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    resDiv.className = "text-[11px] mt-1.5 text-emerald-400 font-bold p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/30";
+                    resDiv.innerHTML = '<i class="fa-solid fa-circle-check mr-1 text-emerald-400"></i> ' + data.message;
+                } else {
+                    resDiv.className = "text-[11px] mt-1.5 text-rose-300 font-medium p-2 rounded-lg bg-rose-950/40 border border-rose-500/30";
+                    resDiv.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1 text-rose-400"></i> ' + data.message;
+                }
+            } catch (e) {
+                resDiv.className = "text-[11px] mt-1.5 text-rose-400 font-bold p-2 rounded-lg bg-rose-950/40 border border-rose-500/30";
+                resDiv.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1"></i> Lỗi: ' + e;
+            }
+        }
+
+        async function testCurrentActiveGithub() {
+            const token = document.getElementById('cfg_gh_token').value.trim();
+            const repo = document.getElementById('cfg_gh_repo').value.trim();
+            if (!token) {
+                alert("Chưa có tài khoản GitHub nào trong pool!");
+                return;
+            }
+            testSingleGitHubAccount('active', token, repo);
+        }
+
+        function toggleBulkImportGitHub() {
+            const box = document.getElementById('ghBulkImportBox');
+            if (box) box.classList.toggle('hidden');
+        }
+
+        async function submitBulkImportGitHub() {
+            const text = document.getElementById('ghBulkText').value.trim();
+            if (!text) return alert("Vui lòng nhập danh sách tài khoản!");
+            const res = await fetch('/api/github_pool/bulk_import', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({text})
+            });
+            const d = await res.json();
+            if (d.status === 'ok') {
+                alert(`Đã nạp thành công ${d.added} tài khoản vào Pool!`);
+                document.getElementById('ghBulkText').value = '';
+                toggleBulkImportGitHub();
+                loadGitHubPoolUI();
+            } else {
+                alert("Lỗi nạp danh sách: " + d.message);
+            }
+        }
+
 
         async function testKaggleConnection() {
             const btn = document.getElementById('btnTestKaggle');
