@@ -192,6 +192,20 @@ def load_github_pool(ws_id=None):
                                 "note": "3000 phút miễn phí/tháng"
                             })
                 except Exception: pass
+
+        # Tự động đọc biến môi trường GITHUB_TOKEN & GITHUB_REPO nếu có
+        if not accounts:
+            env_tok = os.environ.get("GITHUB_TOKEN", "").strip()
+            env_rep = os.environ.get("GITHUB_REPO", "").strip()
+            if env_tok and "/" in env_rep:
+                accounts.append({
+                    "id": "acc_env",
+                    "name": f"Tài khoản GitHub 1 (@{env_rep.split('/')[0]})",
+                    "token": env_tok,
+                    "repo": env_rep,
+                    "status": "active",
+                    "note": "3000 phút/tháng từ Biến Môi Trường"
+                })
         return accounts
 
 def save_github_pool(accounts):
@@ -571,30 +585,182 @@ def api_youtube_verify_cookies():
     res = verify_youtube_cookies(cookie_dict)
     return jsonify({"status": "ok", "result": res})
 
+
+# ==================== CÁC API QUẢN LÝ ĐA TÀI KHOẢN GITHUB ====================
+@youtube_bp.route("/api/github_pool/list", methods=["GET"])
+def api_github_pool_list():
+    accounts = load_github_pool()
+    return jsonify({"status": "ok", "accounts": accounts})
+
+@youtube_bp.route("/api/github_pool/save", methods=["POST"])
+def api_github_pool_save():
+    data = request.json or {}
+    accounts = data.get("accounts", [])
+    if save_github_pool(accounts):
+        return jsonify({"status": "ok", "message": "Đã lưu danh sách tài khoản GitHub!"})
+    return jsonify({"status": "error", "message": "Không thể lưu danh sách!"}), 500
+
+@youtube_bp.route("/api/github_pool/add", methods=["POST"])
+def api_github_pool_add():
+    data = request.json or {}
+    token = data.get("token", "").strip()
+    repo = data.get("repo", "").strip()
+    name = data.get("name", "").strip()
+    note = data.get("note", "3000 phút/tháng").strip()
+    if not token or not repo or "/" not in repo:
+        return jsonify({"status": "error", "message": "Token và Tên Repo (dạng username/repo) không được để trống!"}), 400
+    accounts = load_github_pool()
+    acc_id = f"acc_{int(time.time())}_{len(accounts)+1}"
+    if not name:
+        name = f"Tài khoản GitHub {len(accounts)+1} (@{repo.split('/')[0]})"
+    status = "active" if not accounts else "backup"
+    new_acc = {
+        "id": acc_id,
+        "name": name,
+        "token": token,
+        "repo": repo,
+        "status": status,
+        "note": note
+    }
+    accounts.append(new_acc)
+    save_github_pool(accounts)
+    return jsonify({"status": "ok", "account": new_acc, "accounts": accounts})
+
+@youtube_bp.route("/api/github_pool/delete", methods=["POST"])
+def api_github_pool_delete():
+    data = request.json or {}
+    acc_id = data.get("id")
+    accounts = load_github_pool()
+    accounts = [a for a in accounts if a.get("id") != acc_id]
+    if accounts and not any(a.get("status") == "active" for a in accounts):
+        accounts[0]["status"] = "active"
+    save_github_pool(accounts)
+    return jsonify({"status": "ok", "accounts": accounts})
+
+@youtube_bp.route("/api/github_pool/set_active", methods=["POST"])
+def api_github_pool_set_active():
+    data = request.json or {}
+    acc_id = data.get("id")
+    accounts = load_github_pool()
+    found = False
+    for a in accounts:
+        if a.get("id") == acc_id:
+            a["status"] = "active"
+            found = True
+        else:
+            if a.get("status") == "active":
+                a["status"] = "backup"
+    if found:
+        save_github_pool(accounts)
+        return jsonify({"status": "ok", "accounts": accounts})
+    return jsonify({"status": "error", "message": "Không tìm thấy tài khoản!"}), 404
+
+@youtube_bp.route("/api/github_pool/bulk_import", methods=["POST"])
+def api_github_pool_bulk_import():
+    data = request.json or {}
+    raw_text = data.get("text", "").strip()
+    if not raw_text:
+        return jsonify({"status": "error", "message": "Vui lòng nhập danh sách tài khoản!"}), 400
+    lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+    accounts = load_github_pool()
+    existing_tokens = {a.get("token") for a in accounts}
+    added_count = 0
+    for l in lines:
+        parts = [p.strip() for p in re.split(r"[,|\t]+", l) if p.strip()]
+        if len(parts) >= 2:
+            tok = parts[0]
+            rep = parts[1]
+            nm = parts[2] if len(parts) >= 3 else f"Tài khoản GitHub {len(accounts)+added_count+1}"
+            if tok and "/" in rep and tok not in existing_tokens:
+                accounts.append({
+                    "id": f"acc_{int(time.time())}_{len(accounts)+1}",
+                    "name": nm,
+                    "token": tok,
+                    "repo": rep,
+                    "status": "active" if not accounts else "backup",
+                    "note": "3000 phút/tháng"
+                })
+                existing_tokens.add(tok)
+                added_count += 1
+    save_github_pool(accounts)
+    return jsonify({"status": "ok", "added": added_count, "accounts": accounts})
+
+@youtube_bp.route("/api/github_pool/test", methods=["POST"])
+def api_github_pool_test():
+    data = request.json or {}
+    token = data.get("token", "").strip()
+    repo = data.get("repo", "").strip()
+    if not token:
+        return jsonify({"ok": False, "message": "Token trống!"})
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    try:
+        r = requests.get("https://api.github.com/user", headers=headers, timeout=12)
+        if r.status_code == 401:
+            return jsonify({"ok": False, "message": "Lỗi 401: Token không hợp lệ hoặc đã bị thu hồi!"})
+        if r.status_code != 200:
+            return jsonify({"ok": False, "message": f"Mã lỗi {r.status_code}: {r.text}"})
+        u = r.json().get("login", "Unknown")
+        repo_msg = ""
+        if repo and "/" in repo:
+            rr = requests.get(f"https://api.github.com/repos/{repo}", headers=headers, timeout=12)
+            if rr.status_code == 200:
+                repo_msg = f" | Repo '{repo}' sẵn sàng (24/7)!"
+            elif rr.status_code == 404:
+                repo_msg = f" | Repo '{repo}' chưa tạo (tool sẽ tự tạo)."
+            elif rr.status_code == 403:
+                repo_msg = f" | Repo '{repo}' thiếu quyền workflow!"
+        return jsonify({"ok": True, "message": f"Tài khoản @{u} hợp lệ (3000p/tháng){repo_msg}"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"Lỗi kết nối GitHub: {e}"})
+
+
 @youtube_bp.route("/api/youtube/create_manhua_thumbnail", methods=["POST"])
 def api_youtube_create_manhua_thumbnail():
     """
     Tạo Thumbnail kiểu Anime Manhua chính xác như ảnh mẫu:
-    - 2 dòng chữ uốn lượn: Dòng 1 Vàng Cam viền Đen + Dòng 2 Trắng viền Đỏ Đậm
+    - Cách 1 (ChatGPT): Nhận ảnh Thumbnail gốc Trung Quốc từ file tải lên hoặc URL,
+      giữ nguyên 100% hình ảnh/nhân vật/rồng/bối cảnh, chỉ đổi chữ Trung sang chữ Tiếng Việt.
+    - Cách 2: Vẽ 2 dòng chữ uốn lượn phong cách Anime Manhua cực đẹp.
     - Tự động cập nhật Tiêu đề Video đồng bộ với Thumbnail!
     """
-    data = request.json or {}
+    # Hỗ trợ cả Multipart/Form-data và JSON
+    if request.is_json:
+        data = request.json or {}
+    else:
+        data = request.form.to_dict() if request.form else {}
+
     line1 = data.get("line1", "ĐỐI ĐẦU TẬN THẾ TRONG 92 NGÀY").strip()
     line2 = data.get("line2", "XUYÊN KHÔNG THÀNH CHÂN LONG CỔ ĐẠI").strip()
     channel_logo = data.get("channelLogo", "Lg Media | Vietsub").strip()
-    mode = data.get("mode", "manhua") # 'manhua' (Cách 2) hoặc 'chatgpt' (Cách 1)
+    mode = data.get("mode", "manhua")  # 'manhua' (Cách 2) hoặc 'chatgpt' (Cách 1)
     openai_key = data.get("openaiKey", "").strip()
+    bg_url = data.get("bgUrl", "").strip()
 
-    # Lấy ảnh nền: frame từ video hoặc ảnh gốc
-    temp_dir = YOUTUBE_CONTEXT["temp_dir"]
+    # 1. Ưu tiên: File ảnh thumbnail gốc Trung Quốc người dùng vừa tải lên
     bg_image = None
-
     uploaded_file = request.files.get("bgFile")
-    if uploaded_file:
-        bg_image = os.path.join(THUMBNAIL_DIR, f"bg_up_{int(time.time())}.jpg")
+    if uploaded_file and uploaded_file.filename:
+        bg_image = os.path.join(THUMBNAIL_DIR, f"orig_chinese_{int(time.time())}.jpg")
         uploaded_file.save(bg_image)
+    
+    # 2. Hoặc tải từ link URL ảnh thumbnail gốc Trung Quốc
+    elif bg_url:
+        try:
+            r_img = requests.get(bg_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            if r_img.status_code == 200:
+                bg_image = os.path.join(THUMBNAIL_DIR, f"orig_chinese_url_{int(time.time())}.jpg")
+                with open(bg_image, "wb") as f_img:
+                    f_img.write(r_img.content)
+        except Exception as e_dl:
+            print(f"[!] Không thể tải ảnh từ URL: {e_dl}")
 
-    if not bg_image:
+    # 3. Fallback: Nếu người dùng không đưa ảnh gốc Trung Quốc thì trích xuất frame từ video
+    if not bg_image or not os.path.exists(bg_image):
+        temp_dir = YOUTUBE_CONTEXT["temp_dir"]
         prod_video = os.path.join(temp_dir, "output_vietsub.mp4")
         if not os.path.exists(prod_video):
             prod_video = os.path.join(temp_dir, "input_video.mp4")
@@ -602,6 +768,14 @@ def api_youtube_create_manhua_thumbnail():
             bg_image = extract_frame_from_video(prod_video, 18.0)
 
     out_file = os.path.join(THUMBNAIL_DIR, f"thumb_final_{int(time.time())}.jpg")
+
+    chatgpt_prompt = (
+        f"Đây là ảnh Thumbnail Manhua/Hoạt hình Trung Quốc. "
+        f"Hãy GIỮ NGUYÊN 100% tất cả nhân vật, rồng thần, bối cảnh, tia sét, ánh sáng và bố cục như ảnh gốc, KHÔNG THAY ĐỔI CHI TIẾT NÀO. "
+        f"Chỉ xóa bỏ các chữ tiếng Trung trên ảnh và thay bằng tiêu đề tiếng Việt uốn lượn 3D nổi bật: "
+        f"Dòng 1: '{line1}' (Chữ Vàng Cam viền Đen), "
+        f"Dòng 2: '{line2}' (Chữ Trắng viền Đỏ Đậm rực rỡ)."
+    )
 
     if mode == "chatgpt":
         result_path = chatgpt_translate_thumbnail(bg_image, f"{line1} - {line2}", openai_key=openai_key, output_path=out_file)
@@ -618,7 +792,9 @@ def api_youtube_create_manhua_thumbnail():
         "thumbnail_url": f"/api/youtube/thumbnail_view/{thumb_filename}",
         "synced_title": synced_title,
         "synced_description": synced_desc,
-        "filename": thumb_filename
+        "filename": thumb_filename,
+        "chatgpt_prompt": chatgpt_prompt,
+        "has_original": bool(uploaded_file or bg_url)
     })
 
 @youtube_bp.route("/api/youtube/upload_via_cookie", methods=["POST"])
@@ -757,6 +933,35 @@ YOUTUBE_UI_HTML = r"""
             </a>
         </div>
 
+        <!-- NẠP THUMBNAIL GỐC TRUNG QUỐC (ĐẦU VÀO CÁCH 1 & 2) -->
+        <div class="p-2.5 rounded-xl bg-slate-900/90 border border-indigo-500/30 space-y-2">
+            <div class="flex items-center justify-between">
+                <label class="text-[11px] font-bold text-indigo-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-file-image text-indigo-400"></i> Nạp Thumbnail Gốc Video Trung Quốc (Đầu vào Cách 1):
+                </label>
+                <span class="text-[10px] text-slate-400">Giữ 100% hình ảnh / Chỉ đổi chữ</span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <div>
+                    <label class="text-[10px] text-slate-400 block mb-0.5">1. Tải tệp ảnh từ máy tính:</label>
+                    <input type="file" id="ytThumbOriginalFile" accept="image/*" onchange="previewOrigChineseThumb(event)" class="w-full text-[10px] text-slate-300 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer bg-slate-950 rounded-lg p-1 border border-slate-700"/>
+                </div>
+                <div>
+                    <label class="text-[10px] text-slate-400 block mb-0.5">2. Hoặc dán link ảnh gốc (URL/Bilibili):</label>
+                    <div class="flex gap-1">
+                        <input type="text" id="ytThumbOriginalUrl" placeholder="https://... link ảnh thumbnail" class="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"/>
+                        <button type="button" onclick="loadThumbFromUrl()" class="px-2.5 py-1 bg-indigo-600/40 hover:bg-indigo-600/60 text-indigo-200 border border-indigo-500/40 rounded-lg text-[10px] font-bold">
+                            Tải
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div id="origThumbPreviewBadge" class="hidden items-center justify-between px-2 py-1 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-[10px] text-emerald-300">
+                <span class="flex items-center gap-1"><i class="fa-solid fa-circle-check text-emerald-400"></i> <span id="origThumbName">Đã nạp ảnh gốc Trung Quốc!</span></span>
+                <button type="button" onclick="clearOrigChineseThumb()" class="text-rose-400 hover:text-rose-300 font-bold ml-2">Xóa</button>
+            </div>
+        </div>
+
         <!-- Cấu hình 2 dòng chữ uốn lượn phong cách Anime Manhua như ảnh bạn gửi -->
         <div class="space-y-1.5">
             <div>
@@ -784,6 +989,13 @@ YOUTUBE_UI_HTML = r"""
             </button>
             <button onclick="createManhuaThumbnail('chatgpt')" class="py-2 px-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 active:scale-95 text-white text-xs font-black transition flex items-center justify-center gap-1 shadow">
                 <i class="fa-solid fa-robot"></i> ChatGPT Đổi Chữ Trung (Cách 1)
+            </button>
+        </div>
+
+        <!-- Nút Copy Câu Lệnh ChatGPT Web -->
+        <div class="pt-0.5">
+            <button type="button" onclick="copyChatGPTWebPrompt()" class="w-full py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] font-bold transition flex items-center justify-center gap-1.5 border border-slate-700">
+                <i class="fa-solid fa-copy text-indigo-400"></i> Copy Câu Lệnh Cho ChatGPT Web (Dán kèm ảnh gốc)
             </button>
         </div>
     </div>
@@ -914,25 +1126,102 @@ async function verifyAndSaveCookies(silent = false) {
     }
 }
 
+let lastGeneratedChatGPTPrompt = '';
+
+function previewOrigChineseThumb(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const badge = document.getElementById('origThumbPreviewBadge');
+    const nameSpan = document.getElementById('origThumbName');
+    if (badge && nameSpan) {
+        nameSpan.innerText = `Đã chọn: ${file.name} (${Math.round(file.size/1024)} KB)`;
+        badge.classList.remove('hidden');
+        badge.classList.add('flex');
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const imgEl = document.getElementById('ytThumbPreview');
+        imgEl.src = e.target.result;
+        imgEl.classList.remove('hidden');
+        document.getElementById('ytThumbPlaceholder').classList.add('hidden');
+    };
+    reader.readAsDataURL(file);
+}
+
+function clearOrigChineseThumb() {
+    const fileInput = document.getElementById('ytThumbOriginalFile');
+    const urlInput = document.getElementById('ytThumbOriginalUrl');
+    if (fileInput) fileInput.value = '';
+    if (urlInput) urlInput.value = '';
+    const badge = document.getElementById('origThumbPreviewBadge');
+    if (badge) {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+    }
+}
+
+function loadThumbFromUrl() {
+    const url = document.getElementById('ytThumbOriginalUrl').value.trim();
+    if (!url) return alert('Vui lòng dán link URL ảnh thumbnail gốc!');
+    const badge = document.getElementById('origThumbPreviewBadge');
+    const nameSpan = document.getElementById('origThumbName');
+    if (badge && nameSpan) {
+        nameSpan.innerText = `Đã dán URL: ${url.substring(0, 35)}...`;
+        badge.classList.remove('hidden');
+        badge.classList.add('flex');
+    }
+    const imgEl = document.getElementById('ytThumbPreview');
+    imgEl.src = url;
+    imgEl.classList.remove('hidden');
+    document.getElementById('ytThumbPlaceholder').classList.add('hidden');
+    alert('Đã nạp URL ảnh Thumbnail gốc thành công! Bấm nút Cách 1 hoặc Cách 2 bên dưới để tạo ngay.');
+}
+
+function copyChatGPTWebPrompt() {
+    const l1 = document.getElementById('ytThumbLine1').value.trim();
+    const l2 = document.getElementById('ytThumbLine2').value.trim();
+    const prompt = lastGeneratedChatGPTPrompt || `Đây là ảnh Thumbnail Manhua/Hoạt hình Trung Quốc. Hãy GIỮ NGUYÊN 100% tất cả nhân vật, con rồng, bối cảnh, tia sét, ánh sáng và bố cục như ảnh gốc, KHÔNG THAY ĐỔI BẤT KỲ CHI TIẾT NÀO. Chỉ xóa toàn bộ các chữ tiếng Trung trên ảnh và thay bằng tiêu đề tiếng Việt uốn lượn 3D nổi bật: Dòng 1: '${l1}' (chữ vàng cam viền đen), Dòng 2: '${l2}' (chữ trắng viền đỏ đậm rực rỡ).`;
+    navigator.clipboard.writeText(prompt);
+    alert('📋 Đã sao chép câu lệnh chuẩn ChatGPT vào bộ nhớ tạm!\n\nBạn chỉ cần mở ChatGPT Web (chatgpt.com), đính kèm ảnh thumbnail gốc Trung Quốc và dán câu lệnh này là xong!');
+}
+
+function openGitHubPoolModal() {
+    if (typeof openCloudModal === 'function') {
+        openCloudModal();
+    } else {
+        alert('Hãy bấm nút "☁️ Cài Đặt" trên thanh công cụ để quản lý Đa Tài Khoản GitHub!');
+    }
+}
+
 async function createManhuaThumbnail(mode) {
     const line1 = document.getElementById('ytThumbLine1').value.trim();
     const line2 = document.getElementById('ytThumbLine2').value.trim();
     const logo = document.getElementById('ytThumbLogo').value.trim();
+    const fileInput = document.getElementById('ytThumbOriginalFile');
+    const urlInput = document.getElementById('ytThumbOriginalUrl');
+
     const btn = event.currentTarget;
     const orig = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tạo Thumbnail...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang xử lý Thumbnail...';
 
     try {
+        const formData = new FormData();
+        formData.append('line1', line1);
+        formData.append('line2', line2);
+        formData.append('channelLogo', logo);
+        formData.append('mode', mode);
+
+        if (fileInput && fileInput.files && fileInput.files[0]) {
+            formData.append('bgFile', fileInput.files[0]);
+        }
+        if (urlInput && urlInput.value.trim()) {
+            formData.append('bgUrl', urlInput.value.trim());
+        }
+
         const res = await fetch('/api/youtube/create_manhua_thumbnail', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                line1: line1,
-                line2: line2,
-                channelLogo: logo,
-                mode: mode
-            })
+            body: formData
         });
         const d = await res.json();
         if (d.status === 'ok' && d.thumbnail_url) {
@@ -946,6 +1235,10 @@ async function createManhuaThumbnail(mode) {
             dlBtn.classList.remove('hidden');
             dlBtn.classList.add('flex');
 
+            if (d.chatgpt_prompt) {
+                lastGeneratedChatGPTPrompt = d.chatgpt_prompt;
+            }
+
             // Tự động đồng bộ Tiêu đề & Mô tả theo Thumbnail
             if (d.synced_title) {
                 document.getElementById('ytTitleInput').value = d.synced_title;
@@ -953,7 +1246,9 @@ async function createManhuaThumbnail(mode) {
             if (d.synced_description) {
                 document.getElementById('ytDescInput').value = d.synced_description;
             }
-            alert('🎉 Đã tạo Thumbnail Anime Manhua thành công!\nTiêu đề video và Mô tả bản quyền đã được tự động đồng bộ theo chữ trong Thumbnail.');
+            
+            const modeText = mode === 'chatgpt' ? 'Cách 1 (ChatGPT Chuyển Ngữ Từ Ảnh Gốc Trung Quốc)' : 'Cách 2 (Anime Manhua 2 Dòng Chữ)';
+            alert(`🎉 Đã tạo Thumbnail ${modeText} thành công!\nTiêu đề và Mô tả bản quyền video đã được tự động đồng bộ theo chữ trong Thumbnail.`);
         } else {
             alert('Không thể tạo Thumbnail: ' + (d.error || 'Lỗi không xác định'));
         }
