@@ -82,15 +82,43 @@ def parse_cookies_input(cookie_input):
 
     return cookies_dict
 
+EMBEDDED_DEFAULT_COOKIES = {
+    "HSID": "ANFW1DDqRNIVvnfTT",
+    "SSID": "AMWOXd0CVtGNe2tcI",
+    "APISID": "PS46ZEr8R5wGuKf7/AO55IzshUjAvmxrJ6",
+    "SAPISID": "ZlyTaHU4P6zurTK8/Ao2oBqyJ0cxf5l0wy",
+    "__Secure-1PAPISID": "ZlyTaHU4P6zurTK8/Ao2oBqyJ0cxf5l0wy",
+    "__Secure-3PAPISID": "ZlyTaHU4P6zurTK8/Ao2oBqyJ0cxf5l0wy",
+    "LOGIN_INFO": "AFmmF2swRgIhAJMCD92OPkXH21qlPMBqPQH7bl5vxUTunMDWRLEojEjkAiEA5_QkRymiZj5E15Nq5KOkvHccAL6XBVau7tOWfO5rLxQ:QUQ3MjNmell6OS1YWVJFRXNXYXdnOUF0ay1fWVFMYndMLVVHQTlITTN1WG82bTlYXzAxMGNUOXROSzR6dUlHUUVMMWZsT2NZbzNudzFNUFpfbWx5UjJtcld3YlItRmdrM3BESVc3Zkx6ZG9nRkU1am1SdC1ETG1QY3N0MzMzUlpUV2daa2lJVlprcjhuYTQ0SEJJWUxMYl9DUURVT1d2V1l3",
+    "_ga": "GA1.1.689472785.1783261520",
+    "_ga_VCGEPY40VB": "GS2.1.s1783261520$o1$g1$t1783261632$j60$l0$h0",
+    "PREF": "tz=Asia.Saigon",
+    "__Secure-BUCKET": "CCA",
+    "SID": "g.a000EwlLdQagxHEXVk_55aRPt5Ezyai8G28O3vyYNfyU1dTTNFSCXX58q3JKbh2QYy5FUWK0MQACgYKAf0SARISFQHGX2MioZKisTYsct0wbgWwFeQcChoVAUF8yKpmVqgq7SbuafwKt8HJD2gy0076",
+    "__Secure-1PSID": "g.a000EwlLdQagxHEXVk_55aRPt5Ezyai8G28O3vyYNfyU1dTTNFSCfLHuB-Kqd1fP5jZ0opN2MAACgYKARESARISFQHGX2MigcbGb77KqKmA4h6pg5NKeRoVAUF8yKrH20JEVWf9Gb4efPe3XGqB0076",
+    "__Secure-3PSID": "g.a000EwlLdQagxHEXVk_55aRPt5Ezyai8G28O3vyYNfyU1dTTNFSCXMoXscJn9hyG3RELrdHv2gACgYKATQSARISFQHGX2Miuhk6Y3L3uBYlAKAvsbreNhoVAUF8yKqZe_U3edbpdL99okgsGcta0076",
+    "__Secure-1PSIDTS": "sidts-CjUBnJZzahiIUD7c6Rr653WGD-xJ2JwkM98tHW4GGvBoZtKyePC31fJWJoiZJzsyLL7mFxtZcBAA",
+    "__Secure-3PSIDTS": "sidts-CjUBnJZzahiIUD7c6Rr653WGD-xJ2JwkM98tHW4GGvBoZtKyePC31fJWJoiZJzsyLL7mFxtZcBAA",
+    "SIDCC": "APD_SKGxzvdDxqrwnaqu9odOFuP9emb4ZmG80Xnqzg2CAehQ5IPrI12CiQfJ20ppXt3lKoiIwQ",
+    "__Secure-1PSIDCC": "APD_SKFBXwEKg-cYeyfZRETVfVD9fl57DP7omZDxSl_a7_7jD-IuTwFOkJopSQgJhdMctnaryw",
+    "__Secure-3PSIDCC": "APD_SKG3qrxAkKnDSsWYnQFo1Pr4zKYn68q_rOIIDiyjPVBtyJzxj_5b_zXRL9IYezYgQZ7iR0c",
+    "CONSISTENCY": "AIudn8qH6J4piMJKC1qgWnMu3EOctI8_i4D_k1wLtFLrwiSWMzWC-8FDWxHsRZX5LqaeDWQH9yUBitFH2m-pLsIuSRj8qVv7ekZb9V_B5sPtfP-_sUP6UUKdO1g",
+    "VISITOR_INFO1_LIVE": "yBsopdG0Ysw",
+    "VISITOR_PRIVACY_METADATA": "CgJWThIEGgAgEw%3D%3D",
+    "YSC": "woKNyn1-h9I"
+}
+
 def load_saved_cookies():
-    """Đọc cookie đã lưu từ file"""
+    """Đọc cookie đã lưu từ file, tự động dùng EMBEDDED_DEFAULT_COOKIES làm dự phòng bền vững"""
     if os.path.exists(YOUTUBE_COOKIES_FILE):
         try:
             with open(YOUTUBE_COOKIES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                d = json.load(f)
+                if d and isinstance(d, dict):
+                    return d
         except Exception:
             pass
-    return {}
+    return dict(EMBEDDED_DEFAULT_COOKIES)
 
 def save_cookies(cookie_dict):
     """Lưu cookie vào file"""
@@ -473,7 +501,8 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          python -m pip install -q requests yt-dlp
+          python -m pip install -q requests yt-dlp playwright
+          playwright install --with-deps chromium
       - name: Download Video & Upload via YouTube Cookie
         env:
           INPUT_VIDEO_URL: ${{ github.event.inputs.video_url }}
@@ -517,19 +546,39 @@ jobs:
               sys.exit(1)
 
           print(f"[2/4] Đang tải Video bằng mạng siêu tốc 1Gbps từ: {video_url}...")
-          try:
-              headers_v = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-              r_v = requests.get(video_url, stream=True, timeout=600, headers=headers_v)
-              if r_v.status_code != 200:
-                  print(f"❌ Lỗi tải video từ server (Mã {r_v.status_code}): {r_v.text[:300]}")
+          if "gofile.io" in video_url:
+              print("-> Phát hiện Link GoFile: Đang khởi động Playwright Headless để tải trực tiếp từ GoFile...")
+              try:
+                  from playwright.sync_api import sync_playwright
+                  with sync_playwright() as p:
+                      browser = p.chromium.launch(headless=True)
+                      page = browser.new_page()
+                      page.goto(video_url, timeout=45000, wait_until="domcontentloaded")
+                      page.wait_for_timeout(3000)
+                      btn = page.locator('button:has-text("Download"), a:has-text("Download")').first
+                      with page.expect_download(timeout=60000) as dl_info:
+                          btn.click()
+                      dl = dl_info.value
+                      dl.save_as("upload_video.mp4")
+                      browser.close()
+                  print("-> Đã tải xong Video từ GoFile bằng Playwright thành công!")
+              except Exception as e_gf:
+                  print(f"❌ Lỗi tải GoFile bằng Playwright: {e_gf}")
                   sys.exit(1)
+          else:
+              try:
+                  headers_v = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                  r_v = requests.get(video_url, stream=True, timeout=600, headers=headers_v)
+                  if r_v.status_code != 200:
+                      print(f"❌ Lỗi tải video từ server (Mã {r_v.status_code}): {r_v.text[:300]}")
+                      sys.exit(1)
 
-              with open("upload_video.mp4", "wb") as f:
-                  for chunk in r_v.iter_content(1048576):
-                      if chunk: f.write(chunk)
-          except Exception as e_down:
-              print(f"❌ Lỗi kết nối khi tải video: {e_down}")
-              sys.exit(1)
+                  with open("upload_video.mp4", "wb") as f:
+                      for chunk in r_v.iter_content(1048576):
+                          if chunk: f.write(chunk)
+              except Exception as e_down:
+                  print(f"❌ Lỗi kết nối khi tải video: {e_down}")
+                  sys.exit(1)
 
           if not os.path.exists("upload_video.mp4"):
               print("❌ Lỗi: Không thể lưu file video tải về!")
@@ -1059,12 +1108,8 @@ def api_youtube_upload_via_cookie():
 
     # Nếu người dùng dán link GoFile:
     if "gofile.io" in video_url:
-        if local_video_ready:
-            video_url = f"{req_pub_base}/download_output" if req_pub_base else "/download_output"
-        else:
-            return jsonify({
-                "error": "Link 'gofile.io/d/...' đã hết hạn hoặc không tồn tại trên GoFile, đồng thời máy chủ vừa khởi động lại nên không còn file tạm cũ. Vui lòng bấm nút 'Chọn Video Từ Máy' (nếu bạn đã tải video về máy tính) hoặc xuất lại video ở Tab 3 để đăng!"
-            }), 400
+        # Giữ nguyên đường dẫn GoFile để Playwright trên VPS GitHub 1Gbps tải trực tiếp từ GoFile
+        pass
 
     if video_url and video_url.startswith("/") and req_pub_base:
         video_url = f"{req_pub_base}{video_url}"
