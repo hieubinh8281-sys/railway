@@ -1767,10 +1767,12 @@ def run_worker():
 
         def build_blur_box(a):
             aw, ah = a['w'], a['h']
-            safe_r = min(40, max(16, int(ah * 0.45)))
-            safe_r = min(safe_r, max(2, ah // 2 - 1))
+            safe_lr = min(40, max(10, int(ah * 0.45)))
+            safe_lr = min(safe_lr, max(2, ah // 2 - 1))
+            # FFmpeg boxblur bắt buộc chroma_radius <= 16 và <= ah // 4 để không lỗi Invalid chroma_param (-22)
+            safe_cr = max(1, min(safe_lr, max(1, ah // 4 - 1), 14))
             steps = [f"crop={aw}:{ah}:{a['x']}:{a['y']}"]
-            steps.append(f"boxblur=luma_radius={safe_r}:luma_power=3:chroma_radius={safe_r}")
+            steps.append(f"boxblur=luma_radius={safe_lr}:luma_power=3:chroma_radius={safe_cr}:chroma_power=2")
             # Lớp kính đen mờ quang học 32% xóa sạch triệt để chữ gốc tiếng Trung
             eff_opacity = max(b_op, 0.32) if b_op <= 0.05 else b_op
             steps.append(f"drawbox=x=0:y=0:w={aw}:h={ah}:color=0x{b_col}@{eff_opacity:.2f}:t=fill")
