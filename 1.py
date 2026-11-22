@@ -6973,6 +6973,15 @@ def download_output():
     Phục vụ trực tiếp video thành phẩm output_vietsub.mp4 cho người dùng tải về
     hoặc cho VPS GitHub Actions 1Gbps kéo về đăng lên YouTube.
     """
+    # 1. Nếu có query param ws
+    target_ws = request.args.get("ws")
+    if target_ws:
+        safe_ws = re.sub(r'[^a-zA-Z0-9_\-]', '_', target_ws)[:48]
+        ws_file = os.path.join(WORKSPACES_ROOT, f"ws_{safe_ws}", "output_vietsub.mp4")
+        if os.path.exists(ws_file) and os.path.getsize(ws_file) > 1024:
+            return send_from_directory(os.path.dirname(ws_file), "output_vietsub.mp4", conditional=True)
+
+    # 2. Kiểm tra trong workspace hiện tại của session
     try:
         ws_dir = get_workspace_dir(request)
         file_ws = os.path.join(ws_dir, "output_vietsub.mp4")
@@ -6981,10 +6990,24 @@ def download_output():
     except Exception:
         pass
 
+    # 3. Kiểm tra trong TEMP_DIR
     file_temp = os.path.join(TEMP_DIR, "output_vietsub.mp4")
     if os.path.exists(file_temp) and os.path.getsize(file_temp) > 1024:
         return send_from_directory(TEMP_DIR, "output_vietsub.mp4", conditional=True)
 
+    # 4. Quét toàn bộ các thư mục workspace có sẵn
+    try:
+        if os.path.exists(WORKSPACES_ROOT):
+            ws_folders = [os.path.join(WORKSPACES_ROOT, d) for d in os.listdir(WORKSPACES_ROOT) if d.startswith("ws_")]
+            ws_folders.sort(key=os.path.getmtime, reverse=True)
+            for wf in ws_folders:
+                f_ws = os.path.join(wf, "output_vietsub.mp4")
+                if os.path.exists(f_ws) and os.path.getsize(f_ws) > 1024:
+                    return send_from_directory(wf, "output_vietsub.mp4", conditional=True)
+    except Exception:
+        pass
+
+    # 5. Quét server_jobs
     try:
         if os.path.exists(SERVER_JOBS_DIR):
             subdirs = [os.path.join(SERVER_JOBS_DIR, d) for d in os.listdir(SERVER_JOBS_DIR) if os.path.isdir(os.path.join(SERVER_JOBS_DIR, d))]
@@ -7840,46 +7863,63 @@ def api_download_video_from_url():
 
         # Vượt tường lửa bot check ("Sign in to confirm you're not a bot") của YouTube trên Cloud/Datacenter (Railway/VPS)
         if is_yt:
+            # android_vr và ios là các client vượt qua tường lửa bot-check tốt nhất của YouTube
             ydl_opts['extractor_args'] = {
                 'youtube': {
-                    'player_client': ['android', 'ios', 'web']
+                    'player_client': ['android_vr', 'ios', 'android']
                 }
             }
             # Tự động nạp Cookie Netscape từ youtube_cookies.json nếu có
             try:
+                ck_data = None
                 cookie_json_path = os.path.join(BASE_DIR, "youtube_cookies.json")
                 if os.path.exists(cookie_json_path):
                     with open(cookie_json_path, "r", encoding="utf-8") as f_c:
                         ck_data = json.load(f_c)
-                    if ck_data and isinstance(ck_data, dict):
-                        yt_cookie_file = os.path.join(ws_dir, "yt_cookies.txt")
-                        with open(yt_cookie_file, "w", encoding="utf-8") as f_out:
-                            f_out.write("# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n")
-                            for ck_k, ck_v in ck_data.items():
-                                f_out.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{ck_k}\t{ck_v}\n")
-                        ydl_opts['cookiefile'] = yt_cookie_file
+                if not ck_data:
+                    try:
+                        from nexus_youtube_addon import load_saved_cookies
+                        ck_data = load_saved_cookies()
+                    except Exception:
+                        pass
+                if ck_data and isinstance(ck_data, dict):
+                    yt_cookie_file = os.path.join(ws_dir, "yt_cookies.txt")
+                    with open(yt_cookie_file, "w", encoding="utf-8") as f_out:
+                        f_out.write("# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n")
+                        for ck_k, ck_v in ck_data.items():
+                            f_out.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{ck_k}\t{ck_v}\n")
+                            f_out.write(f".google.com\tTRUE\t/\tTRUE\t2147483647\t{ck_k}\t{ck_v}\n")
+                    ydl_opts['cookiefile'] = yt_cookie_file
             except Exception as e_ck:
                 print(f"[!] Warning cookie export for yt-dlp: {e_ck}")
 
-        # Tải video với cơ chế fallback tự động nếu YouTube chặn bot
+        # Tải video với cơ chế đa tầng fallback tự động
         info = None
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-        except Exception as e_dl:
-            if is_yt:
-                print(f"[!] Thử lại YouTube với Android Player Client: {e_dl}", flush=True)
-                ydl_opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                except Exception as e_dl2:
-                    print(f"[!] Thử lại YouTube với iOS Player Client: {e_dl2}", flush=True)
-                    ydl_opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-            else:
-                raise e_dl
+        clients_to_try = [
+            ['android_vr', 'ios', 'android'],
+            ['android_vr'],
+            ['ios'],
+            ['android'],
+            ['mweb']
+        ] if is_yt else [None]
+        last_dl_err = None
+
+        for cl in clients_to_try:
+            if is_yt and cl:
+                ydl_opts['extractor_args'] = {'youtube': {'player_client': cl}}
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                if info:
+                    break
+            except Exception as e_dl:
+                last_dl_err = e_dl
+                if not is_yt:
+                    break
+                print(f"[!] Thử tải YouTube với client {cl} gặp lỗi: {e_dl}", flush=True)
+
+        if not info and last_dl_err:
+            return jsonify({"ok": False, "error": f"Lỗi tải video: {last_dl_err}"}), 400
 
         video_title = (info.get("title") if info else None) or "Video từ Link"
         duration = (info.get("duration") if info else None) or 0
