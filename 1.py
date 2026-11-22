@@ -6967,6 +6967,40 @@ def serve_temp(filename):
         return send_from_directory(ws_dir, filename, conditional=True)
     return send_from_directory(TEMP_DIR, filename, conditional=True)
 
+@app.route("/download_output")
+def download_output():
+    """
+    Phục vụ trực tiếp video thành phẩm output_vietsub.mp4 cho người dùng tải về
+    hoặc cho VPS GitHub Actions 1Gbps kéo về đăng lên YouTube.
+    """
+    try:
+        ws_dir = get_workspace_dir(request)
+        file_ws = os.path.join(ws_dir, "output_vietsub.mp4")
+        if os.path.exists(file_ws) and os.path.getsize(file_ws) > 1024:
+            return send_from_directory(ws_dir, "output_vietsub.mp4", conditional=True)
+    except Exception:
+        pass
+
+    file_temp = os.path.join(TEMP_DIR, "output_vietsub.mp4")
+    if os.path.exists(file_temp) and os.path.getsize(file_temp) > 1024:
+        return send_from_directory(TEMP_DIR, "output_vietsub.mp4", conditional=True)
+
+    try:
+        if os.path.exists(SERVER_JOBS_DIR):
+            subdirs = [os.path.join(SERVER_JOBS_DIR, d) for d in os.listdir(SERVER_JOBS_DIR) if os.path.isdir(os.path.join(SERVER_JOBS_DIR, d))]
+            subdirs.sort(key=os.path.getmtime, reverse=True)
+            for sd in subdirs:
+                j_out = os.path.join(sd, "output_vietsub.mp4")
+                if os.path.exists(j_out) and os.path.getsize(j_out) > 1024:
+                    return send_file(j_out, conditional=True)
+    except Exception:
+        pass
+
+    if ACTIVE_CLOUD_JOB.get("direct_url"):
+        return redirect(ACTIVE_CLOUD_JOB["direct_url"])
+
+    return jsonify({"error": "Chưa có file video thành phẩm output_vietsub.mp4 nào sẵn sàng!"}), 404
+
 @app.route("/workspace/<ws_id>/<path:filename>")
 def serve_workspace_file(ws_id, filename):
     safe_ws = re.sub(r'[^a-zA-Z0-9_\-]', '_', ws_id)[:48]
