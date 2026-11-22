@@ -836,6 +836,7 @@ def api_youtube_upload_custom_thumbnail():
     CÁCH 1: Nhận file ảnh thumbnail của bản thân người dùng (hoặc link ảnh),
     lưu lại và gán làm Thumbnail chính thức để tải lên YouTube cùng video!
     """
+    os.makedirs(THUMBNAIL_DIR, exist_ok=True)
     thumb_file = request.files.get("thumbFile")
     json_data = request.get_json(silent=True) or {}
     thumb_url_input = (request.form.get("thumbUrl") or json_data.get("thumbUrl") or "").strip()
@@ -875,6 +876,35 @@ def api_youtube_upload_custom_thumbnail():
         "message": "Đã chọn Thumbnail của bạn thành công! Ảnh này sẽ được tự động tải lên YouTube cùng Video."
     })
 
+@youtube_bp.route("/api/youtube/upload_local_video_for_publish", methods=["POST"])
+def api_youtube_upload_local_video_for_publish():
+    """Nhận file video từ máy tính của người dùng để chuẩn bị đăng lên YouTube"""
+    file = request.files.get("videoFile")
+    if not file or not file.filename:
+        return jsonify({"error": "Vui lòng chọn file video (.mp4) từ máy tính!"}), 400
+
+    temp_dir = YOUTUBE_CONTEXT.get("temp_dir", "")
+    os.makedirs(temp_dir, exist_ok=True)
+    out_video_path = os.path.join(temp_dir, "output_vietsub.mp4")
+
+    try:
+        file.save(out_video_path)
+        sz_mb = round(os.path.getsize(out_video_path) / (1024 * 1024), 2)
+
+        proto = request.headers.get("X-Forwarded-Proto") or ("https" if request.is_secure else "http")
+        host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
+        req_pub_base = f"{proto}://{host}".rstrip("/") if host else ""
+        full_url = f"{req_pub_base}/download_output" if req_pub_base else "/download_output"
+
+        return jsonify({
+            "status": "ok",
+            "url": full_url,
+            "size_mb": sz_mb,
+            "message": f"Đã nạp file video từ máy tính ({sz_mb} MB) thành công! Sẵn sàng đăng lên YouTube."
+        })
+    except Exception as e:
+        return jsonify({"error": f"Lỗi lưu file video: {e}"}), 500
+
 @youtube_bp.route("/api/youtube/create_manhua_thumbnail", methods=["POST"])
 def api_youtube_create_manhua_thumbnail():
     """
@@ -893,6 +923,7 @@ def api_youtube_create_manhua_thumbnail():
     line1 = data.get("line1", "ĐỐI ĐẦU TẬN THẾ TRONG 92 NGÀY").strip()
     line2 = data.get("line2", "XUYÊN KHÔNG THÀNH CHÂN LONG CỔ ĐẠI").strip()
     channel_logo = data.get("channelLogo", "Lg Media | Vietsub").strip()
+    os.makedirs(THUMBNAIL_DIR, exist_ok=True)
     mode = data.get("mode", "manhua")  # 'manhua' (Cách 2) hoặc 'chatgpt' (Cách 1)
     openai_key = data.get("openaiKey", "").strip()
     bg_url = data.get("bgUrl", "").strip()
@@ -1000,23 +1031,40 @@ def api_youtube_upload_via_cookie():
     host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
     req_pub_base = f"{proto}://{host}".rstrip("/") if host else ""
 
-    # Tự động thay thế nếu người dùng dán link GoFile (giao diện web)
-    gofile_swapped = False
-    if "gofile.io" in video_url:
-        cand = os.path.join(YOUTUBE_CONTEXT["temp_dir"], "output_vietsub.mp4")
-        if (os.path.exists(cand) and os.path.getsize(cand) > 1024) or req_pub_base:
+    # Kiểm tra xem có video thành phẩm sẵn sàng trên server không
+    local_video_ready = False
+    cand = os.path.join(YOUTUBE_CONTEXT.get("temp_dir", ""), "output_vietsub.mp4")
+    if os.path.exists(cand) and os.path.getsize(cand) > 1024:
+        local_video_ready = True
+    else:
+        try:
+            ws_root = os.path.join(BASE_DIR, "workspaces")
+            if os.path.exists(ws_root):
+                for d in os.listdir(ws_root):
+                    f_cand = os.path.join(ws_root, d, "output_vietsub.mp4")
+                    if os.path.exists(f_cand) and os.path.getsize(f_cand) > 1024:
+                        local_video_ready = True
+                        break
+        except Exception:
+            pass
+
+    # Nếu video_url là /download_output nhưng server chưa có video nào
+    if ("/download_output" in video_url or not video_url):
+        if local_video_ready:
             video_url = f"{req_pub_base}/download_output" if req_pub_base else "/download_output"
-            gofile_swapped = True
         else:
             return jsonify({
-                "error": "Link 'gofile.io/d/...' là link trang web HTML, không phải file video trực tiếp! Hãy bấm nút 'Dùng Ngay Video Sản Phẩm Vừa Render' hoặc dán direct link MP4."
+                "error": "Chưa có file video thành phẩm trên máy chủ! Hãy bấm 'Chọn Video Từ Máy' hoặc xuất lại video ở Tab 3 rồi bấm Đăng lại."
             }), 400
 
-    if not video_url:
-        cand = os.path.join(YOUTUBE_CONTEXT["temp_dir"], "output_vietsub.mp4")
-        if os.path.exists(cand):
-            pub_base = YOUTUBE_CONTEXT.get("tunnel_info", {}).get("public_url", "")
-            video_url = f"{pub_base}/download_output" if pub_base else "/download_output"
+    # Nếu người dùng dán link GoFile:
+    if "gofile.io" in video_url:
+        if local_video_ready:
+            video_url = f"{req_pub_base}/download_output" if req_pub_base else "/download_output"
+        else:
+            return jsonify({
+                "error": "Link 'gofile.io/d/...' đã hết hạn hoặc không tồn tại trên GoFile, đồng thời máy chủ vừa khởi động lại nên không còn file tạm cũ. Vui lòng bấm nút 'Chọn Video Từ Máy' (nếu bạn đã tải video về máy tính) hoặc xuất lại video ở Tab 3 để đăng!"
+            }), 400
 
     if video_url and video_url.startswith("/") and req_pub_base:
         video_url = f"{req_pub_base}{video_url}"
@@ -1235,12 +1283,17 @@ YOUTUBE_UI_HTML = r"""
             </select>
         </div>
 
-        <div class="flex items-center gap-1.5">
-            <button onclick="useCurrentProductVideoForYouTube()" class="w-full py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition flex items-center justify-center gap-1 border border-slate-700">
-                <i class="fa-solid fa-video text-red-400"></i> Dùng Ngay Video Sản Phẩm Vừa Render
+        <div class="grid grid-cols-2 gap-1.5">
+            <button onclick="useCurrentProductVideoForYouTube()" class="py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition flex items-center justify-center gap-1 border border-slate-700">
+                <i class="fa-solid fa-video text-red-400"></i> Video Vừa Render
+            </button>
+            <button onclick="document.getElementById('ytLocalVideoFileInput').click()" class="py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition flex items-center justify-center gap-1 border border-slate-700">
+                <i class="fa-solid fa-upload text-blue-400"></i> Nạp Video Từ Máy
             </button>
         </div>
-        <input type="text" id="ytVideoUrlInput" placeholder="Hoặc dán Link GoFile / Direct mp4 tải video..." class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-red-200 outline-none"/>
+        <input type="file" id="ytLocalVideoFileInput" accept="video/mp4,video/*" class="hidden" onchange="uploadLocalVideoForYouTube(this)"/>
+        <input type="text" id="ytVideoUrlInput" placeholder="Hoặc dán Direct Link MP4 tải video..." class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-red-200 outline-none"/>
+        <div id="ytVideoStatusMsg" class="text-[11px] text-slate-400 hidden"></div>
 
         <button id="btnDispatchYouTubeCookie" onclick="dispatchUploadToYouTubeViaCookie()" class="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 hover:from-red-500 hover:to-red-600 active:scale-95 text-white text-xs font-black uppercase tracking-wider transition flex items-center justify-center gap-2 shadow-lg shadow-red-950/60">
             <i class="fa-brands fa-youtube text-base"></i> ĐĂNG LÊN YOUTUBE BẰNG COOKIE (VPS GITHUB 1GBPS)
@@ -1619,6 +1672,34 @@ async function useCurrentProductVideoForYouTube() {
     }
 }
 
+async function uploadLocalVideoForYouTube(input) {
+    if (!input.files || !input.files[0]) return;
+    const file = input.files[0];
+    const statusEl = document.getElementById('ytVideoStatusMsg');
+    statusEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-blue-400"></i> Đang nạp video (' + (file.size/(1024*1024)).toFixed(1) + ' MB)...';
+    statusEl.classList.remove('hidden');
+    const fd = new FormData();
+    fd.append('videoFile', file);
+    try {
+        const res = await fetch('/api/youtube/upload_local_video_for_publish', {
+            method: 'POST',
+            body: fd
+        });
+        const d = await res.json();
+        if (d.status === 'ok') {
+            document.getElementById('ytVideoUrlInput').value = d.url;
+            statusEl.innerHTML = '<span class="text-emerald-400 font-bold">✅ ' + d.message + '</span>';
+            alert(d.message);
+        } else {
+            statusEl.innerHTML = '<span class="text-red-400 font-bold">❌ ' + (d.error || 'Lỗi nạp video') + '</span>';
+            alert('Lỗi: ' + (d.error || 'Không thể nạp video'));
+        }
+    } catch(e) {
+        statusEl.innerHTML = '<span class="text-red-400 font-bold">❌ Lỗi: ' + e + '</span>';
+        alert('Lỗi nạp video: ' + e);
+    }
+}
+
 function copyToClipboard(elementId) {
     const el = document.getElementById(elementId);
     if (el) {
@@ -1632,7 +1713,11 @@ function copyToClipboard(elementId) {
 
 # ==================== 8. HÀM KÍCH HOẠT VÀ INJECT GIAO DIỆN VÀO 1.PY ====================
 def register_nexus_youtube_addon(app, temp_dir=None, update_progress_fn=None, tunnel_info_dict=None):
-    if temp_dir: YOUTUBE_CONTEXT["temp_dir"] = temp_dir
+    global THUMBNAIL_DIR
+    if temp_dir:
+        YOUTUBE_CONTEXT["temp_dir"] = temp_dir
+        THUMBNAIL_DIR = os.path.join(temp_dir, "thumbnails")
+        os.makedirs(THUMBNAIL_DIR, exist_ok=True)
     if update_progress_fn: YOUTUBE_CONTEXT["update_progress"] = update_progress_fn
     if tunnel_info_dict: YOUTUBE_CONTEXT["tunnel_info"] = tunnel_info_dict
 
