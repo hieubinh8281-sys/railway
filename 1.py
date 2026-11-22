@@ -7776,6 +7776,7 @@ def api_download_video_from_url():
 
         target_template = os.path.join(ws_dir, "dl_temp.%(ext)s")
         is_bili = any(x in url.lower() for x in ['bilibili.com', 'b23.tv'])
+        is_yt = any(x in url.lower() for x in ['youtube.com', 'youtu.be'])
         req_headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
             'Accept': '*/*',
@@ -7800,10 +7801,52 @@ def api_download_video_from_url():
             'fragment_retries': 10,
             'http_headers': req_headers
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_title = info.get("title") or "Video từ Link"
-            duration = info.get("duration") or 0
+
+        # Vượt tường lửa bot check ("Sign in to confirm you're not a bot") của YouTube trên Cloud/Datacenter (Railway/VPS)
+        if is_yt:
+            ydl_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'web']
+                }
+            }
+            # Tự động nạp Cookie Netscape từ youtube_cookies.json nếu có
+            try:
+                cookie_json_path = os.path.join(BASE_DIR, "youtube_cookies.json")
+                if os.path.exists(cookie_json_path):
+                    with open(cookie_json_path, "r", encoding="utf-8") as f_c:
+                        ck_data = json.load(f_c)
+                    if ck_data and isinstance(ck_data, dict):
+                        yt_cookie_file = os.path.join(ws_dir, "yt_cookies.txt")
+                        with open(yt_cookie_file, "w", encoding="utf-8") as f_out:
+                            f_out.write("# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n")
+                            for ck_k, ck_v in ck_data.items():
+                                f_out.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{ck_k}\t{ck_v}\n")
+                        ydl_opts['cookiefile'] = yt_cookie_file
+            except Exception as e_ck:
+                print(f"[!] Warning cookie export for yt-dlp: {e_ck}")
+
+        # Tải video với cơ chế fallback tự động nếu YouTube chặn bot
+        info = None
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+        except Exception as e_dl:
+            if is_yt:
+                print(f"[!] Thử lại YouTube với Android Player Client: {e_dl}", flush=True)
+                ydl_opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                except Exception as e_dl2:
+                    print(f"[!] Thử lại YouTube với iOS Player Client: {e_dl2}", flush=True)
+                    ydl_opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+            else:
+                raise e_dl
+
+        video_title = (info.get("title") if info else None) or "Video từ Link"
+        duration = (info.get("duration") if info else None) or 0
 
         downloaded_file = None
         for cand in os.listdir(ws_dir):
