@@ -410,8 +410,9 @@ def build_filter_complex_with_logo(
     elif len(valid_areas) == 1:
         a = valid_areas[0]
         safe_r = max(2, min(eff_sigma, min(a['w'], a['h']) // 3))
+        safe_cr = max(1, min(safe_r, max(1, min(a['w'], a['h']) // 4 - 1), 14))
         b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
-        b_steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_r}")
+        b_steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_cr}:chroma_power=2")
         if blur_opacity > 0.02:
             b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
         base_chain = (
@@ -426,8 +427,9 @@ def build_filter_complex_with_logo(
         chain_parts = [f"[0:v]split={n+1}[main]{split_names}"]
         for i, a in enumerate(valid_areas):
             safe_r = max(2, min(eff_sigma, min(a['w'], a['h']) // 3))
+            safe_cr = max(1, min(safe_r, max(1, min(a['w'], a['h']) // 4 - 1), 14))
             b_steps = [f"crop={a['w']}:{a['h']}:{a['x']}:{a['y']}"]
-            b_steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_r}")
+            b_steps.append(f"boxblur=luma_radius={safe_r}:luma_power=2:chroma_radius={safe_cr}:chroma_power=2")
             if blur_opacity > 0.02:
                 b_steps.append(f"drawbox=x=0:y=0:w={a['w']}:h={a['h']}:color=0x{blur_color_clean}@{blur_opacity:.2f}:t=fill")
             chain_parts.append(f"[cs{i}]{','.join(b_steps)}[bl{i}]")
