@@ -440,7 +440,7 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'Direct/Gofile Video URL'
+        description: 'Direct Video URL'
         required: true
       thumb_url:
         description: 'Thumbnail Image URL'
@@ -475,125 +475,204 @@ jobs:
         run: |
           python -m pip install -q requests yt-dlp
       - name: Download Video & Upload via YouTube Cookie
+        env:
+          INPUT_VIDEO_URL: ${{ github.event.inputs.video_url }}
+          INPUT_THUMB_URL: ${{ github.event.inputs.thumb_url }}
+          INPUT_TITLE: ${{ github.event.inputs.title }}
+          INPUT_DESC: ${{ github.event.inputs.description }}
+          INPUT_TAGS: ${{ github.event.inputs.tags }}
+          INPUT_PRIVACY: ${{ github.event.inputs.privacy }}
+          INPUT_COOKIES_B64: ${{ github.event.inputs.cookies_b64 }}
         run: |
-          cat << 'EOF' > upload_with_cookie.py
+          cat << 'PYEOF' > upload_with_cookie.py
           import os, sys, json, base64, time, hashlib, requests
 
-          video_url = "${{ github.event.inputs.video_url }}"
-          thumb_url = "${{ github.event.inputs.thumb_url }}"
-          v_title = "${{ github.event.inputs.title }}"
-          v_desc = str('''${{ github.event.inputs.description }}''')
-          v_tags = [t.strip() for t in "${{ github.event.inputs.tags }}".split(",") if t.strip()]
-          v_privacy = "${{ github.event.inputs.privacy }}" or "public"
-          cookies_b64 = "${{ github.event.inputs.cookies_b64 }}"
+          video_url = os.environ.get("INPUT_VIDEO_URL", "").strip()
+          thumb_url = os.environ.get("INPUT_THUMB_URL", "").strip()
+          v_title = os.environ.get("INPUT_TITLE", "").strip() or "Video Mới"
+          v_desc = os.environ.get("INPUT_DESC", "")
+          v_tags = [t.strip() for t in os.environ.get("INPUT_TAGS", "").split(",") if t.strip()]
+          v_privacy = (os.environ.get("INPUT_PRIVACY") or "public").upper()
+          cookies_b64 = os.environ.get("INPUT_COOKIES_B64", "")
 
           print("[1/4] Đang giải mã Cookie YouTube...")
+          if not cookies_b64:
+              print("❌ LỖI: Không nhận được cookie YouTube!")
+              sys.exit(1)
+
           cookies_text = base64.b64decode(cookies_b64).decode("utf-8")
-          with open("cookies.txt", "w", encoding="utf-8") as f:
-              f.write(cookies_text)
-
-          print(f"[2/4] Đang tải Video bằng mạng siêu tốc 1Gbps từ: {video_url}...")
-          r_v = requests.get(video_url, stream=True, timeout=300)
-          with open("upload_video.mp4", "wb") as f:
-              for chunk in r_v.iter_content(1048576):
-                  if chunk: f.write(chunk)
-          sz_mb = round(os.path.getsize("upload_video.mp4")/(1024*1024), 2)
-          print(f"-> Đã tải Video xong ({sz_mb} MB)!")
-
-          if thumb_url and thumb_url.startswith("http"):
-              print(f"[3/4] Đang tải Thumbnail từ {thumb_url}...")
-              r_t = requests.get(thumb_url, timeout=30)
-              if r_t.status_code == 200:
-                  with open("thumb.jpg", "wb") as f: f.write(r_t.content)
-
-          print("[4/4] Bắt đầu đẩy Video lên kênh YouTube qua Cookie...")
-          # Trích xuất SAPISID để tạo chữ ký SAPISIDHASH
-          sapisid = ""
           cookies_dict = {}
           for line in cookies_text.splitlines():
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
               if "\t" in line:
                   parts = line.split("\t")
                   if len(parts) >= 7:
                       cookies_dict[parts[5].strip()] = parts[6].strip()
-          sapisid = cookies_dict.get("SAPISID") or cookies_dict.get("__Secure-3PAPISID") or ""
 
-          if sapisid:
-              curr_time = str(int(time.time()))
-              sha1_in = f"{curr_time} {sapisid} https://studio.youtube.com"
-              auth_h = f"SAPISIDHASH {curr_time}_{hashlib.sha1(sha1_in.encode()).hexdigest()}"
-              cookie_h = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+          sapisid = cookies_dict.get("SAPISID") or cookies_dict.get("__Secure-3PAPISID") or cookies_dict.get("__Secure-1PAPISID") or ""
+          if not sapisid:
+              print("❌ LỖI: Cookie YouTube thiếu khóa bảo mật SAPISID! Vui lòng xuất lại file cookies.txt khi đang đăng nhập YouTube Studio.")
+              sys.exit(1)
 
-              up_headers = {
+          print(f"[2/4] Đang tải Video bằng mạng siêu tốc 1Gbps từ: {video_url}...")
+          try:
+              headers_v = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+              r_v = requests.get(video_url, stream=True, timeout=600, headers=headers_v)
+              if r_v.status_code != 200:
+                  print(f"❌ Lỗi tải video từ server (Mã {r_v.status_code}): {r_v.text[:300]}")
+                  sys.exit(1)
+
+              with open("upload_video.mp4", "wb") as f:
+                  for chunk in r_v.iter_content(1048576):
+                      if chunk: f.write(chunk)
+          except Exception as e_down:
+              print(f"❌ Lỗi kết nối khi tải video: {e_down}")
+              sys.exit(1)
+
+          if not os.path.exists("upload_video.mp4"):
+              print("❌ Lỗi: Không thể lưu file video tải về!")
+              sys.exit(1)
+
+          sz_bytes = os.path.getsize("upload_video.mp4")
+          sz_mb = round(sz_bytes / (1024 * 1024), 2)
+          print(f"-> Đã tải xong file video: {sz_mb} MB ({sz_bytes} bytes)")
+
+          # Kiểm tra nếu file quá nhỏ hoặc trả về HTML
+          if sz_bytes < 100 * 1024:
+              with open("upload_video.mp4", "rb") as f_chk:
+                  sample = f_chk.read(300)
+              if b"<!doctype" in sample.lower() or b"<html" in sample.lower():
+                  print("❌ LỖI NGHIÊM TRỌNG: Đường dẫn video trả về trang web HTML thay vì file video MP4!")
+                  print("-> Bạn không thể dùng đường dẫn trang web (như gofile.io/d/...).")
+                  print("-> Hãy bấm nút 'Dùng Ngay Video Sản Phẩm Vừa Render' hoặc dùng Direct link kết thúc bằng .mp4")
+                  sys.exit(1)
+              else:
+                  print("❌ CẢNH BÁO: File video quá nhỏ (< 100KB), có thể bị lỗi.")
+                  sys.exit(1)
+
+          if thumb_url and thumb_url.startswith("http"):
+              print(f"[3/4] Đang tải Thumbnail từ {thumb_url}...")
+              try:
+                  r_t = requests.get(thumb_url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+                  if r_t.status_code == 200 and len(r_t.content) > 500:
+                      with open("thumb.jpg", "wb") as f: f.write(r_t.content)
+                      print(f"-> Đã tải xong Thumbnail ({len(r_t.content)} bytes)!")
+              except Exception as e_th:
+                  print(f"[!] Bỏ qua lỗi tải thumbnail: {e_th}")
+
+          print("[4/4] Bắt đầu đẩy Video lên kênh YouTube qua Studio API...")
+          curr_time = str(int(time.time()))
+          sha1_in = f"{curr_time} {sapisid} https://studio.youtube.com"
+          auth_h = f"SAPISIDHASH {curr_time}_{hashlib.sha1(sha1_in.encode()).hexdigest()}"
+          cookie_h = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+
+          up_headers = {
+              "Authorization": auth_h,
+              "Cookie": cookie_h,
+              "X-Origin": "https://studio.youtube.com",
+              "X-Goog-Upload-Command": "start",
+              "X-Goog-Upload-Header-Content-Length": str(sz_bytes),
+              "X-Goog-Upload-Protocol": "resumable",
+              "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"
+          }
+
+          r_init = requests.post("https://upload.youtube.com/upload/studio", headers=up_headers, timeout=45)
+          upload_url = r_init.headers.get("X-Goog-Upload-URL")
+          if not upload_url:
+              print(f"❌ Khởi tạo phiên upload YouTube Studio thất bại (Mã {r_init.status_code}): {r_init.text}")
+              sys.exit(1)
+
+          print(f"-> Đã kết nối kênh thành công! Đang truyền {sz_mb} MB video lên YouTube...")
+          with open("upload_video.mp4", "rb") as vf:
+              h_chunk = {
                   "Authorization": auth_h,
                   "Cookie": cookie_h,
-                  "X-Origin": "https://studio.youtube.com",
-                  "X-Goog-Upload-Command": "start",
-                  "X-Goog-Upload-Header-Content-Length": str(os.path.getsize("upload_video.mp4")),
-                  "X-Goog-Upload-Protocol": "resumable",
-                  "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"
+                  "X-Goog-Upload-Command": "upload, finalize",
+                  "X-Goog-Upload-Offset": "0"
               }
-              r_init = requests.post("https://upload.youtube.com/upload/studio", headers=up_headers, timeout=30)
-              upload_url = r_init.headers.get("X-Goog-Upload-URL")
-              if upload_url:
-                  print("-> Đang truyền tải dữ liệu Video lên YouTube...")
-                  with open("upload_video.mp4", "rb") as vf:
-                      h_chunk = {"Authorization": auth_h, "Cookie": cookie_h, "X-Goog-Upload-Command": "upload, finalize", "X-Goog-Upload-Offset": "0"}
-                      r_fin = requests.post(upload_url, headers=h_chunk, data=vf, timeout=300)
-                      scotty_id = r_fin.text
-                      print(f"-> Scotty Upload ID: {scotty_id[:40]}...")
+              r_fin = requests.post(upload_url, headers=h_chunk, data=vf, timeout=900)
 
-                      # Khởi tạo video record
-                      create_url = "https://studio.youtube.com/youtubei/v1/video_creation/create_video"
-                      p_create = {
-                          "context": {"client": {"clientName": "STUDIO", "clientVersion": "2.20240401.00.00"}},
-                          "resourceId": {"scottyResourceId": {"id": scotty_id}},
-                          "initialMetadata": {
-                              "title": {"newTitle": v_title[:100]},
-                              "description": {"newDescription": v_desc[:4900]},
-                              "privacy": {"newPrivacy": v_privacy.upper()}
-                          }
-                      }
-                      r_cr = requests.post(create_url, headers={"Authorization": auth_h, "Cookie": cookie_h, "X-Origin": "https://studio.youtube.com", "Content-Type": "application/json"}, json=p_create, timeout=30)
-                      vid = r_cr.json().get("videoId")
-                      if vid:
-                          print(f"🎉 ĐĂNG VIDEO BẰNG COOKIE THÀNH CÔNG! Link: https://youtu.be/{vid}")
-                          if os.path.exists("thumb.jpg"):
-                              print("-> [Thumbnail] Đang đẩy ảnh Thumbnail của bạn lên video YouTube...")
-                              try:
-                                  th_init_h = {
-                                      "Authorization": auth_h,
-                                      "Cookie": cookie_h,
-                                      "X-Origin": "https://studio.youtube.com",
-                                      "X-Goog-Upload-Command": "start",
-                                      "X-Goog-Upload-Header-Content-Length": str(os.path.getsize("thumb.jpg")),
-                                      "X-Goog-Upload-Protocol": "resumable",
-                                      "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"
+          scotty_id = r_fin.text.strip()
+          if not scotty_id or scotty_id.startswith("{") or r_fin.status_code not in (200, 201):
+              print(f"❌ Upload dữ liệu video lên máy chủ YouTube thất bại: {r_fin.status_code} - {scotty_id}")
+              sys.exit(1)
+
+          print(f"-> Scotty Upload ID nhận được: {scotty_id[:35]}...")
+
+          # Khởi tạo video record
+          create_url = "https://studio.youtube.com/youtubei/v1/video_creation/create_video"
+          p_create = {
+              "context": {"client": {"clientName": "STUDIO", "clientVersion": "2.20240401.00.00"}},
+              "resourceId": {"scottyResourceId": {"id": scotty_id}},
+              "initialMetadata": {
+                  "title": {"newTitle": v_title[:100]},
+                  "description": {"newDescription": v_desc[:4900]},
+                  "privacy": {"newPrivacy": v_privacy}
+              }
+          }
+          r_cr = requests.post(create_url, headers={"Authorization": auth_h, "Cookie": cookie_h, "X-Origin": "https://studio.youtube.com", "Content-Type": "application/json"}, json=p_create, timeout=60)
+          cr_json = r_cr.json()
+          vid = cr_json.get("videoId")
+
+          if not vid:
+              print(f"❌ YouTube từ chối tạo bản ghi video (Mã {r_cr.status_code}): {r_cr.text}")
+              sys.exit(1)
+
+          print(f"🎉🎉🎉 ĐĂNG VIDEO BẰNG COOKIE THÀNH CÔNG! Link Video: https://youtu.be/{vid}")
+
+          # Cập nhật tags
+          if v_tags:
+              try:
+                  p_tags = {
+                      "context": {"client": {"clientName": "STUDIO", "clientVersion": "2.20240401.00.00"}},
+                      "encryptedVideoId": vid,
+                      "tags": {"newTags": v_tags[:30]}
+                  }
+                  requests.post("https://studio.youtube.com/youtubei/v1/video_manager/metadata_update", headers={"Authorization": auth_h, "Cookie": cookie_h, "X-Origin": "https://studio.youtube.com", "Content-Type": "application/json"}, json=p_tags, timeout=30)
+                  print("-> Đã cập nhật Tags cho video!")
+              except Exception as e_tag:
+                  print(f"[!] Warning update tags: {e_tag}")
+
+          # Đẩy ảnh Thumbnail lên
+          if os.path.exists("thumb.jpg"):
+              print("-> [Thumbnail] Đang tải ảnh Thumbnail của bạn lên video YouTube...")
+              try:
+                  th_sz = os.path.getsize("thumb.jpg")
+                  th_init_h = {
+                      "Authorization": auth_h,
+                      "Cookie": cookie_h,
+                      "X-Origin": "https://studio.youtube.com",
+                      "X-Goog-Upload-Command": "start",
+                      "X-Goog-Upload-Header-Content-Length": str(th_sz),
+                      "X-Goog-Upload-Protocol": "resumable",
+                      "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"
+                  }
+                  r_th_i = requests.post("https://upload.youtube.com/upload/studio", headers=th_init_h, timeout=30)
+                  th_url = r_th_i.headers.get("X-Goog-Upload-URL")
+                  if th_url:
+                      with open("thumb.jpg", "rb") as tf:
+                          h_tf = {"Authorization": auth_h, "Cookie": cookie_h, "X-Goog-Upload-Command": "upload, finalize", "X-Goog-Upload-Offset": "0"}
+                          r_th_f = requests.post(th_url, headers=h_tf, data=tf, timeout=60)
+                          th_id = r_th_f.text.strip()
+                          if th_id:
+                              p_meta = {
+                                  "context": {"client": {"clientName": "STUDIO", "clientVersion": "2.20240401.00.00"}},
+                                  "encryptedVideoId": vid,
+                                  "videoStill": {
+                                      "operation": "SET_CUSTOM",
+                                      "image": {"scottyResourceId": {"id": th_id}}
                                   }
-                                  r_th_i = requests.post("https://upload.youtube.com/upload/studio", headers=th_init_h, timeout=30)
-                                  th_url = r_th_i.headers.get("X-Goog-Upload-URL")
-                                  if th_url:
-                                      with open("thumb.jpg", "rb") as tf:
-                                          h_tf = {"Authorization": auth_h, "Cookie": cookie_h, "X-Goog-Upload-Command": "upload, finalize", "X-Goog-Upload-Offset": "0"}
-                                          r_th_f = requests.post(th_url, headers=h_tf, data=tf, timeout=60)
-                                          th_id = r_th_f.text
-                                          if th_id:
-                                              p_meta = {
-                                                  "context": {"client": {"clientName": "STUDIO", "clientVersion": "2.20240401.00.00"}},
-                                                  "encryptedVideoId": vid,
-                                                  "videoStill": {
-                                                      "operation": "SET_CUSTOM",
-                                                      "image": {"scottyResourceId": {"id": th_id}}
-                                                  }
-                                              }
-                                              requests.post("https://studio.youtube.com/youtubei/v1/video_manager/metadata_update", headers={"Authorization": auth_h, "Cookie": cookie_h, "X-Origin": "https://studio.youtube.com", "Content-Type": "application/json"}, json=p_meta, timeout=30)
-                                              print("-> 🎉 Đã cập nhật ảnh Thumbnail của bạn lên video YouTube thành công!")
-                              except Exception as e_th:
-                                  print(f"[!] Warning update thumbnail: {e_th}")
-                          exit(0)
+                              }
+                              requests.post("https://studio.youtube.com/youtubei/v1/video_manager/metadata_update", headers={"Authorization": auth_h, "Cookie": cookie_h, "X-Origin": "https://studio.youtube.com", "Content-Type": "application/json"}, json=p_meta, timeout=30)
+                              print("-> 🎉 Đã cập nhật ảnh Thumbnail của bạn lên video YouTube thành công!")
+              except Exception as e_th:
+                  print(f"[!] Warning update thumbnail: {e_th}")
 
-          # Fallback thông báo thành công
-          print("🎉 Hoàn tất tiến trình upload YouTube với Cookie!")
-          EOF
+          print(f"SUCCESS_VIDEO_ID={vid}")
+          sys.exit(0)
+          PYEOF
           python upload_with_cookie.py
 """
 
@@ -875,6 +954,30 @@ def api_youtube_create_manhua_thumbnail():
         "has_original": bool(uploaded_file or bg_url)
     })
 
+@youtube_bp.route("/api/youtube/get_product_video_info", methods=["GET"])
+def api_youtube_get_product_video_info():
+    """Kiểm tra video sản phẩm vừa render xong trên hệ thống"""
+    temp_dir = YOUTUBE_CONTEXT.get("temp_dir", "")
+    prod_video = os.path.join(temp_dir, "output_vietsub.mp4")
+    
+    proto = request.headers.get("X-Forwarded-Proto") or ("https" if request.is_secure else "http")
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
+    req_pub_base = f"{proto}://{host}".rstrip("/") if host else ""
+    
+    exists = False
+    size_mb = 0.0
+    if os.path.exists(prod_video) and os.path.getsize(prod_video) > 1024:
+        exists = True
+        size_mb = round(os.path.getsize(prod_video) / (1024 * 1024), 2)
+    
+    return jsonify({
+        "status": "ok",
+        "exists": exists,
+        "url": f"{req_pub_base}/download_output" if req_pub_base else "/download_output",
+        "size_mb": size_mb,
+        "message": f"Video sản phẩm ({size_mb} MB) sẵn sàng!" if exists else "Chưa có file video sẵn sàng."
+    })
+
 @youtube_bp.route("/api/youtube/upload_via_cookie", methods=["POST"])
 def api_youtube_upload_via_cookie():
     """Đăng video lên YouTube bằng Cookie qua mạng VPS GitHub 1Gbps"""
@@ -893,15 +996,27 @@ def api_youtube_upload_via_cookie():
     if not cookies_dict:
         return jsonify({"error": "Chưa có Cookie YouTube! Hãy nhập hoặc dán cookies.txt ở mục Quản Lý Cookie YouTube."}), 400
 
+    proto = request.headers.get("X-Forwarded-Proto") or ("https" if request.is_secure else "http")
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
+    req_pub_base = f"{proto}://{host}".rstrip("/") if host else ""
+
+    # Tự động thay thế nếu người dùng dán link GoFile (giao diện web)
+    gofile_swapped = False
+    if "gofile.io" in video_url:
+        cand = os.path.join(YOUTUBE_CONTEXT["temp_dir"], "output_vietsub.mp4")
+        if (os.path.exists(cand) and os.path.getsize(cand) > 1024) or req_pub_base:
+            video_url = f"{req_pub_base}/download_output" if req_pub_base else "/download_output"
+            gofile_swapped = True
+        else:
+            return jsonify({
+                "error": "Link 'gofile.io/d/...' là link trang web HTML, không phải file video trực tiếp! Hãy bấm nút 'Dùng Ngay Video Sản Phẩm Vừa Render' hoặc dán direct link MP4."
+            }), 400
+
     if not video_url:
         cand = os.path.join(YOUTUBE_CONTEXT["temp_dir"], "output_vietsub.mp4")
         if os.path.exists(cand):
             pub_base = YOUTUBE_CONTEXT.get("tunnel_info", {}).get("public_url", "")
             video_url = f"{pub_base}/download_output" if pub_base else "/download_output"
-
-    proto = request.headers.get("X-Forwarded-Proto") or ("https" if request.is_secure else "http")
-    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
-    req_pub_base = f"{proto}://{host}".rstrip("/") if host else ""
 
     if video_url and video_url.startswith("/") and req_pub_base:
         video_url = f"{req_pub_base}{video_url}"
@@ -1457,6 +1572,9 @@ async function dispatchUploadToYouTubeViaCookie() {
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-base"></i> Đang kích hoạt VPS GitHub 1Gbps...';
 
     try {
+        if (videoUrl.includes('gofile.io/d/')) {
+            console.log('[Notice] Link GoFile detected, switching to product direct video.');
+        }
         const res = await fetch('/api/youtube/upload_via_cookie', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -1471,7 +1589,7 @@ async function dispatchUploadToYouTubeViaCookie() {
         });
         const data = await res.json();
         if (data.status === 'ok') {
-            alert('🎉 ' + data.message + '\n\nVideo của bạn đang được tải lên YouTube bằng Cookie qua máy chủ mạng 1Gbps!');
+            alert('🎉 ' + data.message + '\n\nTiến trình tải lên YouTube đang chạy trên VPS GitHub Actions mạng 1Gbps!\nBạn có thể vào tab Actions trên GitHub để theo dõi tiến độ chi tiết.');
         } else if (data.status === 'failover') {
             alert('⚠️ ' + data.message + '\nHãy bấm lại nút Đăng để gửi sang tài khoản GitHub mới!');
         } else {
@@ -1485,9 +1603,20 @@ async function dispatchUploadToYouTubeViaCookie() {
     }
 }
 
-function useCurrentProductVideoForYouTube() {
-    document.getElementById('ytVideoUrlInput').value = window.location.origin + '/download_output';
-    alert('Đã chọn Video sản phẩm vừa render xong để đăng YouTube!');
+async function useCurrentProductVideoForYouTube() {
+    const fullUrl = window.location.origin + '/download_output';
+    document.getElementById('ytVideoUrlInput').value = fullUrl;
+    try {
+        const res = await fetch('/api/youtube/get_product_video_info');
+        const data = await res.json();
+        if (data.exists) {
+            alert(`✅ Đã kết nối Video sản phẩm vừa render (${data.size_mb} MB)!\nĐường dẫn tải trực tiếp: ${fullUrl}\nSẵn sàng đẩy thẳng lên YouTube qua VPS GitHub 1Gbps.`);
+        } else {
+            alert(`✅ Đã chọn Video sản phẩm: ${fullUrl}\n(Hãy đảm bảo bạn đã hoàn tất xuất video ở Tab 3 hoặc vừa nhận video thành phẩm từ Cloud)`);
+        }
+    } catch(e) {
+        alert('✅ Đã chọn Video sản phẩm: ' + fullUrl);
+    }
 }
 
 function copyToClipboard(elementId) {
