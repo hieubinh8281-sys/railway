@@ -555,8 +555,41 @@ jobs:
                       }
                       r_cr = requests.post(create_url, headers={"Authorization": auth_h, "Cookie": cookie_h, "X-Origin": "https://studio.youtube.com", "Content-Type": "application/json"}, json=p_create, timeout=30)
                       vid = r_cr.json().get("videoId")
-                      print(f"🎉 ĐĂNG VIDEO BẰNG COOKIE THÀNH CÔNG! Link: https://youtu.be/{vid}")
-                      exit(0)
+                      if vid:
+                          print(f"🎉 ĐĂNG VIDEO BẰNG COOKIE THÀNH CÔNG! Link: https://youtu.be/{vid}")
+                          if os.path.exists("thumb.jpg"):
+                              print("-> [Thumbnail] Đang đẩy ảnh Thumbnail của bạn lên video YouTube...")
+                              try:
+                                  th_init_h = {
+                                      "Authorization": auth_h,
+                                      "Cookie": cookie_h,
+                                      "X-Origin": "https://studio.youtube.com",
+                                      "X-Goog-Upload-Command": "start",
+                                      "X-Goog-Upload-Header-Content-Length": str(os.path.getsize("thumb.jpg")),
+                                      "X-Goog-Upload-Protocol": "resumable",
+                                      "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"
+                                  }
+                                  r_th_i = requests.post("https://upload.youtube.com/upload/studio", headers=th_init_h, timeout=30)
+                                  th_url = r_th_i.headers.get("X-Goog-Upload-URL")
+                                  if th_url:
+                                      with open("thumb.jpg", "rb") as tf:
+                                          h_tf = {"Authorization": auth_h, "Cookie": cookie_h, "X-Goog-Upload-Command": "upload, finalize", "X-Goog-Upload-Offset": "0"}
+                                          r_th_f = requests.post(th_url, headers=h_tf, data=tf, timeout=60)
+                                          th_id = r_th_f.text
+                                          if th_id:
+                                              p_meta = {
+                                                  "context": {"client": {"clientName": "STUDIO", "clientVersion": "2.20240401.00.00"}},
+                                                  "encryptedVideoId": vid,
+                                                  "videoStill": {
+                                                      "operation": "SET_CUSTOM",
+                                                      "image": {"scottyResourceId": {"id": th_id}}
+                                                  }
+                                              }
+                                              requests.post("https://studio.youtube.com/youtubei/v1/video_manager/metadata_update", headers={"Authorization": auth_h, "Cookie": cookie_h, "X-Origin": "https://studio.youtube.com", "Content-Type": "application/json"}, json=p_meta, timeout=30)
+                                              print("-> 🎉 Đã cập nhật ảnh Thumbnail của bạn lên video YouTube thành công!")
+                              except Exception as e_th:
+                                  print(f"[!] Warning update thumbnail: {e_th}")
+                          exit(0)
 
           # Fallback thông báo thành công
           print("🎉 Hoàn tất tiến trình upload YouTube với Cookie!")
@@ -718,6 +751,51 @@ def api_github_pool_test():
         return jsonify({"ok": False, "message": f"Lỗi kết nối GitHub: {e}"})
 
 
+@youtube_bp.route("/api/youtube/upload_custom_thumbnail", methods=["POST"])
+def api_youtube_upload_custom_thumbnail():
+    """
+    CÁCH 1: Nhận file ảnh thumbnail của bản thân người dùng (hoặc link ảnh),
+    lưu lại và gán làm Thumbnail chính thức để tải lên YouTube cùng video!
+    """
+    thumb_file = request.files.get("thumbFile")
+    json_data = request.get_json(silent=True) or {}
+    thumb_url_input = (request.form.get("thumbUrl") or json_data.get("thumbUrl") or "").strip()
+
+    out_file = os.path.join(THUMBNAIL_DIR, f"thumb_custom_{int(time.time())}.jpg")
+
+    if thumb_file and thumb_file.filename:
+        try:
+            im = Image.open(thumb_file).convert("RGB")
+            im = im.resize((1280, 720), Image.Resampling.LANCZOS)
+            im.save(out_file, "JPEG", quality=95)
+        except Exception:
+            thumb_file.seek(0)
+            thumb_file.save(out_file)
+    elif thumb_url_input:
+        try:
+            r = requests.get(thumb_url_input, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                with open(out_file, "wb") as f_out: f_out.write(r.content)
+                try:
+                    im = Image.open(out_file).convert("RGB")
+                    im = im.resize((1280, 720), Image.Resampling.LANCZOS)
+                    im.save(out_file, "JPEG", quality=95)
+                except Exception: pass
+            else:
+                return jsonify({"error": f"Không thể tải ảnh từ link ({r.status_code})"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Lỗi tải link ảnh: {e}"}), 400
+    else:
+        return jsonify({"error": "Vui lòng chọn file ảnh hoặc dán link ảnh Thumbnail của bạn!"}), 400
+
+    fn = os.path.basename(out_file)
+    return jsonify({
+        "status": "ok",
+        "thumbnail_url": f"/api/youtube/thumbnail_view/{fn}",
+        "filename": fn,
+        "message": "Đã chọn Thumbnail của bạn thành công! Ảnh này sẽ được tự động tải lên YouTube cùng Video."
+    })
+
 @youtube_bp.route("/api/youtube/create_manhua_thumbnail", methods=["POST"])
 def api_youtube_create_manhua_thumbnail():
     """
@@ -820,6 +898,16 @@ def api_youtube_upload_via_cookie():
         if os.path.exists(cand):
             pub_base = YOUTUBE_CONTEXT.get("tunnel_info", {}).get("public_url", "")
             video_url = f"{pub_base}/download_output" if pub_base else "/download_output"
+
+    proto = request.headers.get("X-Forwarded-Proto") or ("https" if request.is_secure else "http")
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
+    req_pub_base = f"{proto}://{host}".rstrip("/") if host else ""
+
+    if video_url and video_url.startswith("/") and req_pub_base:
+        video_url = f"{req_pub_base}{video_url}"
+
+    if thumb_url and thumb_url.startswith("/") and req_pub_base:
+        thumb_url = f"{req_pub_base}{thumb_url}"
 
     if not video_url:
         return jsonify({"error": "Chưa có đường dẫn Video để tải lên!"}), 400
@@ -933,69 +1021,60 @@ YOUTUBE_UI_HTML = r"""
             </a>
         </div>
 
-        <!-- NẠP THUMBNAIL GỐC TRUNG QUỐC (ĐẦU VÀO CÁCH 1 & 2) -->
-        <div class="p-2.5 rounded-xl bg-slate-900/90 border border-indigo-500/30 space-y-2">
+        <!-- CÁCH 1: DÙNG THUMBNAIL CỦA BẢN THÂN (TỰ TẢI ẢNH ĐĂNG YOUTUBE) -->
+        <div class="p-3 rounded-xl bg-slate-900/90 border border-emerald-500/40 space-y-2.5">
             <div class="flex items-center justify-between">
-                <label class="text-[11px] font-bold text-indigo-300 flex items-center gap-1.5">
-                    <i class="fa-solid fa-file-image text-indigo-400"></i> Nạp Thumbnail Gốc Video Trung Quốc (Đầu vào Cách 1):
+                <label class="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-cloud-arrow-up text-emerald-400"></i> CÁCH 1: DÙNG THUMBNAIL CỦA BẠN (TỰ ĐƯA ẢNH LÊN YOUTUBE)
                 </label>
-                <span class="text-[10px] text-slate-400">Giữ 100% hình ảnh / Chỉ đổi chữ</span>
+                <span class="text-[10px] text-emerald-300 bg-emerald-950 border border-emerald-500/40 px-2 py-0.5 rounded font-bold">Khuyên Dùng</span>
             </div>
+            
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
                 <div>
-                    <label class="text-[10px] text-slate-400 block mb-0.5">1. Tải tệp ảnh từ máy tính:</label>
-                    <input type="file" id="ytThumbOriginalFile" accept="image/*" onchange="previewOrigChineseThumb(event)" class="w-full text-[10px] text-slate-300 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer bg-slate-950 rounded-lg p-1 border border-slate-700"/>
+                    <label class="text-[10px] text-slate-300 block mb-0.5 font-medium">1. Chọn tệp ảnh Thumbnail từ máy tính:</label>
+                    <input type="file" id="ytThumbCustomFile" accept="image/*" onchange="handleSelectCustomThumbnail(event)" class="w-full text-[10px] text-slate-300 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer bg-slate-950 rounded-lg p-1 border border-slate-700"/>
                 </div>
                 <div>
-                    <label class="text-[10px] text-slate-400 block mb-0.5">2. Hoặc dán link ảnh gốc (URL/Bilibili):</label>
+                    <label class="text-[10px] text-slate-300 block mb-0.5 font-medium">2. Hoặc dán link ảnh Thumbnail:</label>
                     <div class="flex gap-1">
-                        <input type="text" id="ytThumbOriginalUrl" placeholder="https://... link ảnh thumbnail" class="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"/>
-                        <button type="button" onclick="loadThumbFromUrl()" class="px-2.5 py-1 bg-indigo-600/40 hover:bg-indigo-600/60 text-indigo-200 border border-indigo-500/40 rounded-lg text-[10px] font-bold">
-                            Tải
+                        <input type="text" id="ytThumbCustomUrl" placeholder="https://... link ảnh thumbnail" class="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 outline-none focus:border-emerald-500"/>
+                        <button type="button" onclick="loadCustomThumbFromUrl()" class="px-2.5 py-1 bg-emerald-600/40 hover:bg-emerald-600/60 text-emerald-200 border border-emerald-500/40 rounded-lg text-[10px] font-bold">
+                            Nạp
                         </button>
                     </div>
                 </div>
             </div>
-            <div id="origThumbPreviewBadge" class="hidden items-center justify-between px-2 py-1 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-[10px] text-emerald-300">
-                <span class="flex items-center gap-1"><i class="fa-solid fa-circle-check text-emerald-400"></i> <span id="origThumbName">Đã nạp ảnh gốc Trung Quốc!</span></span>
-                <button type="button" onclick="clearOrigChineseThumb()" class="text-rose-400 hover:text-rose-300 font-bold ml-2">Xóa</button>
+
+            <div id="thumbReadyBadge" class="hidden items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-[11px] text-emerald-300 font-bold">
+                <span class="flex items-center gap-1.5"><i class="fa-solid fa-circle-check text-emerald-400"></i> <span id="thumbStatusText">Đã chọn Thumbnail của bạn! Sẵn sàng đưa lên YouTube.</span></span>
+                <button type="button" onclick="clearCustomThumbnail()" class="text-rose-400 hover:text-rose-300 text-[10px] font-bold">Đổi ảnh khác</button>
             </div>
+
+            <button type="button" id="btnUseMyThumb" onclick="useMyOwnThumbnail()" class="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-95 text-white text-xs font-black uppercase tracking-wide transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50">
+                <i class="fa-solid fa-check-double text-sm"></i> XÁC NHẬN DÙNG THUMBNAIL NÀY ĐỂ ĐĂNG YOUTUBE (CÁCH 1)
+            </button>
         </div>
 
-        <!-- Cấu hình 2 dòng chữ uốn lượn phong cách Anime Manhua như ảnh bạn gửi -->
-        <div class="space-y-1.5">
+        <!-- CÁCH 2: HOẶC TỰ ĐỘNG VẼ THUMBNAIL MANHUA 2 DÒNG CHỮ (TÙY CHỌN) -->
+        <div class="p-2.5 rounded-xl bg-slate-900/60 border border-amber-500/30 space-y-1.5">
+            <span class="text-[11px] font-bold text-amber-300 block">
+                <i class="fa-solid fa-paintbrush text-amber-400 mr-1"></i> CÁCH 2: TỰ ĐỘNG VẼ THUMBNAIL THEO ẢNH MẪU (TÙY CHỌN)
+            </span>
             <div>
-                <label class="text-[10px] font-bold text-amber-300 flex items-center gap-1 mb-0.5">
-                    <span>1. Dòng Trên (Chữ Vàng Cam Nghiêng Viền Đen):</span>
-                </label>
-                <input type="text" id="ytThumbLine1" value="ĐỐI ĐẦU TẬN THẾ TRONG 92 NGÀY" class="w-full bg-slate-950 border border-amber-500/40 rounded-lg px-2.5 py-1.5 text-xs text-amber-300 font-black tracking-wide outline-none"/>
+                <label class="text-[10px] text-amber-300 block mb-0.5">Dòng Trên (Chữ Vàng Cam Nghiêng Viền Đen):</label>
+                <input type="text" id="ytThumbLine1" value="ĐỐI ĐẦU TẬN THẾ TRONG 92 NGÀY" class="w-full bg-slate-950 border border-amber-500/40 rounded px-2 py-1 text-xs text-amber-300 font-bold outline-none"/>
             </div>
             <div>
-                <label class="text-[10px] font-bold text-red-400 flex items-center gap-1 mb-0.5">
-                    <span>2. Dòng Dưới (Chữ Trắng Viền Đỏ Đậm 3D Rực Rỡ):</span>
-                </label>
-                <input type="text" id="ytThumbLine2" value="XUYÊN KHÔNG THÀNH CHÂN LONG CỔ ĐẠI" class="w-full bg-slate-950 border border-red-500/40 rounded-lg px-2.5 py-1.5 text-xs text-white font-black tracking-wide outline-none"/>
+                <label class="text-[10px] text-red-400 block mb-0.5">Dòng Dưới (Chữ Trắng Viền Đỏ Đậm 3D Rực Rỡ):</label>
+                <input type="text" id="ytThumbLine2" value="XUYÊN KHÔNG THÀNH CHÂN LONG CỔ ĐẠI" class="w-full bg-slate-950 border border-red-500/40 rounded px-2 py-1 text-xs text-white font-bold outline-none"/>
             </div>
             <div>
                 <label class="text-[10px] text-slate-400 block mb-0.5">Logo/Tên Kênh Góc Trên Phải:</label>
-                <input type="text" id="ytThumbLogo" value="Lg Media | Vietsub" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-300 outline-none"/>
+                <input type="text" id="ytThumbLogo" value="Lg Media | Vietsub" class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 outline-none"/>
             </div>
-        </div>
-
-        <!-- Nút tạo Thumbnail theo 2 cách -->
-        <div class="grid grid-cols-2 gap-2 pt-1">
-            <button onclick="createManhuaThumbnail('manhua')" class="py-2 px-2 rounded-xl bg-gradient-to-r from-amber-600 to-yellow-600 hover:from-amber-500 hover:to-yellow-500 active:scale-95 text-white text-xs font-black transition flex items-center justify-center gap-1 shadow">
-                <i class="fa-solid fa-paintbrush"></i> Tạo Thumbnail Như Ảnh Mẫu (Cách 2)
-            </button>
-            <button onclick="createManhuaThumbnail('chatgpt')" class="py-2 px-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 active:scale-95 text-white text-xs font-black transition flex items-center justify-center gap-1 shadow">
-                <i class="fa-solid fa-robot"></i> ChatGPT Đổi Chữ Trung (Cách 1)
-            </button>
-        </div>
-
-        <!-- Nút Copy Câu Lệnh ChatGPT Web -->
-        <div class="pt-0.5">
-            <button type="button" onclick="copyChatGPTWebPrompt()" class="w-full py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] font-bold transition flex items-center justify-center gap-1.5 border border-slate-700">
-                <i class="fa-solid fa-copy text-indigo-400"></i> Copy Câu Lệnh Cho ChatGPT Web (Dán kèm ảnh gốc)
+            <button onclick="createManhuaThumbnail('manhua')" class="w-full mt-1 py-1.5 px-2 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 text-[11px] font-bold transition flex items-center justify-center gap-1.5">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> Vẽ Thumbnail Anime 2 Dòng Chữ (Cách 2)
             </button>
         </div>
     </div>
@@ -1190,6 +1269,105 @@ function openGitHubPoolModal() {
         openCloudModal();
     } else {
         alert('Hãy bấm nút "☁️ Cài Đặt" trên thanh công cụ để quản lý Đa Tài Khoản GitHub!');
+    }
+}
+
+
+// ==================== CÁCH 1: DÙNG THUMBNAIL CỦA BẢN THÂN ====================
+function handleSelectCustomThumbnail(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const imgEl = document.getElementById('ytThumbPreview');
+        imgEl.src = e.target.result;
+        imgEl.classList.remove('hidden');
+        document.getElementById('ytThumbPlaceholder').classList.add('hidden');
+    };
+    reader.readAsDataURL(file);
+
+    // Tự động nạp luôn lên server
+    useMyOwnThumbnail();
+}
+
+function loadCustomThumbFromUrl() {
+    const url = document.getElementById('ytThumbCustomUrl').value.trim();
+    if (!url) return alert('Vui lòng dán link URL ảnh Thumbnail của bạn!');
+    const imgEl = document.getElementById('ytThumbPreview');
+    imgEl.src = url;
+    imgEl.classList.remove('hidden');
+    document.getElementById('ytThumbPlaceholder').classList.add('hidden');
+    useMyOwnThumbnail();
+}
+
+function clearCustomThumbnail() {
+    const fileInput = document.getElementById('ytThumbCustomFile');
+    const urlInput = document.getElementById('ytThumbCustomUrl');
+    if (fileInput) fileInput.value = '';
+    if (urlInput) urlInput.value = '';
+    const badge = document.getElementById('thumbReadyBadge');
+    if (badge) badge.classList.add('hidden');
+}
+
+async function useMyOwnThumbnail() {
+    const fileInput = document.getElementById('ytThumbCustomFile');
+    const urlInput = document.getElementById('ytThumbCustomUrl');
+    const btn = document.getElementById('btnUseMyThumb');
+    const orig = btn ? btn.innerHTML : '';
+    
+    if ((!fileInput || !fileInput.files || !fileInput.files[0]) && (!urlInput || !urlInput.value.trim())) {
+        alert("Vui lòng chọn 1 tệp ảnh từ máy tính hoặc dán link ảnh Thumbnail của bạn trước!");
+        return;
+    }
+
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang nạp Thumbnail của bạn...';
+    }
+
+    try {
+        const formData = new FormData();
+        if (fileInput && fileInput.files && fileInput.files[0]) {
+            formData.append('thumbFile', fileInput.files[0]);
+        }
+        if (urlInput && urlInput.value.trim()) {
+            formData.append('thumbUrl', urlInput.value.trim());
+        }
+
+        const res = await fetch('/api/youtube/upload_custom_thumbnail', {
+            method: 'POST',
+            body: formData
+        });
+        const d = await res.json();
+        if (d.status === 'ok' && d.thumbnail_url) {
+            currentManhuaThumbnailUrl = window.location.origin + d.thumbnail_url;
+            const imgEl = document.getElementById('ytThumbPreview');
+            imgEl.src = d.thumbnail_url + '?t=' + Date.now();
+            imgEl.classList.remove('hidden');
+            document.getElementById('ytThumbPlaceholder').classList.add('hidden');
+            const dlBtn = document.getElementById('btnDownloadThumb');
+            dlBtn.href = d.thumbnail_url;
+            dlBtn.classList.remove('hidden');
+            dlBtn.classList.add('flex');
+
+            const badge = document.getElementById('thumbReadyBadge');
+            const statusText = document.getElementById('thumbStatusText');
+            if (badge && statusText) {
+                statusText.innerText = 'Đã khóa Thumbnail của bạn! Sẵn sàng đưa lên YouTube.';
+                badge.classList.remove('hidden');
+                badge.classList.add('flex');
+            }
+            alert('🎉 ' + d.message);
+        } else {
+            alert('Không thể nạp Thumbnail: ' + (d.error || 'Lỗi không xác định'));
+        }
+    } catch (e) {
+        alert('Lỗi: ' + e);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = orig;
+        }
     }
 }
 
