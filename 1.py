@@ -7857,9 +7857,10 @@ def api_download_video_from_url():
             'no_warnings': True,
             'nocheckcertificate': True,
             'retries': 10,
-            'fragment_retries': 10,
-            'http_headers': req_headers
+            'fragment_retries': 10
         }
+        if not is_yt:
+            ydl_opts['http_headers'] = req_headers
 
         # Vượt tường lửa bot check ("Sign in to confirm you're not a bot") của YouTube trên Cloud/Datacenter (Railway/VPS)
         if is_yt:
