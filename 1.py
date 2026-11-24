@@ -5,6 +5,7 @@ import time
 import json
 import math
 import uuid
+import random
 import ctypes
 import socket
 import shutil
@@ -7937,9 +7938,77 @@ def download_youtube_via_public_api(video_id, out_mp4_path, ws_id=None):
 
     return False, "Không thể tải video qua Piped/Invidious Public API", 0
 
+def get_proxy_display(proxy_url):
+    """Trích xuất IP:PORT từ URL proxy để in log an toàn, ẩn hoàn toàn mật khẩu và user"""
+    if not proxy_url:
+        return ""
+    try:
+        # Nếu có username:password@host:port
+        if "@" in proxy_url:
+            host_part = proxy_url.split("@")[-1].rstrip("/")
+            return host_part
+        # Nếu dạng http://host:port hoặc socks5://host:port
+        m = re.match(r'^(?:https?|socks5|socks5h)://([^/]+)', proxy_url, re.I)
+        if m:
+            return m.group(1)
+        return proxy_url.strip()
+    except Exception:
+        return "Proxy"
+
+def parse_proxy_pool():
+    """
+    Đọc danh sách proxy từ biến môi trường YTDLP_PROXIES và YTDLP_PROXY.
+    Hỗ trợ ngăn cách bằng dấu phẩy ',', chấm phẩy ';', hoặc xuống dòng '\\n'.
+    Chuẩn hóa:
+      + Nếu là dạng http://... hoặc socks5://... -> giữ nguyên.
+      + Nếu là dạng Webshare IP:PORT:USER:PASS (4 phần) -> http://USER:PASS@IP:PORT.
+      + Nếu là dạng IP:PORT (2 phần) -> http://IP:PORT.
+    Trả về danh sách proxy hợp lệ đã được xáo trộn thứ tự (random.shuffle).
+    """
+    raw_env = f"{os.environ.get('YTDLP_PROXIES', '')}\n{os.environ.get('YTDLP_PROXY', '')}".strip()
+    if not raw_env:
+        return []
+
+    tokens = re.split(r'[,;\r\n]+', raw_env)
+    proxies = []
+
+    for item in tokens:
+        item = item.strip()
+        if not item or item.startswith("#"):
+            continue
+
+        # Định dạng có schema (http://, https://, socks5://, socks5h://)
+        if re.match(r'^(https?|socks5|socks5h)://', item, re.I):
+            proxies.append(item)
+            continue
+
+        # Định dạng IP:PORT:USER:PASS (Webshare) hoặc IP:PORT
+        parts = item.split(':')
+        if len(parts) == 4:
+            ip, port, user, pwd = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+            proxies.append(f"http://{user}:{pwd}@{ip}:{port}")
+        elif len(parts) == 2:
+            ip, port = parts[0].strip(), parts[1].strip()
+            proxies.append(f"http://{ip}:{port}")
+        elif "@" in item:
+            proxies.append(f"http://{item}")
+
+    # Khử trùng lặp
+    seen = set()
+    unique_proxies = []
+    for p in proxies:
+        if p not in seen:
+            seen.add(p)
+            unique_proxies.append(p)
+
+    if unique_proxies:
+        random.shuffle(unique_proxies)
+
+    return unique_proxies
+
 @app.route("/api/video/download_url", methods=["POST"])
 def api_download_video_from_url():
-    """Tự động tải video từ YouTube (chế độ Zero-Account), Bilibili, Douyin, TikTok... về workspace và nạp thẳng vào tool"""
+    """Tự động tải video từ YouTube (chế độ Zero-Account & Proxy Pool Rotation), Bilibili, Douyin, TikTok... về workspace và nạp thẳng vào tool"""
     data = request.json or {}
     raw_url = (data.get("url") or "").strip()
     if not raw_url:
@@ -8019,35 +8088,55 @@ def api_download_video_from_url():
         }
     }
 
-    # Hỗ trợ tùy chọn proxy qua biến môi trường YTDLP_PROXY
-    ytdlp_proxy = os.environ.get("YTDLP_PROXY", "").strip()
-    if ytdlp_proxy:
-        base_opts["proxy"] = ytdlp_proxy
-
     if is_bili:
         base_opts["http_headers"]["Referer"] = "https://www.bilibili.com/"
         base_opts["http_headers"]["Range"] = "bytes=0-"
 
-    # Thiết lập các chiến lược tải trực tiếp yt-dlp KHÔNG CẦN TÀI KHOẢN (Zero-Account)
+    # Thiết lập chiến lược tải trực tiếp yt-dlp KHÔNG CẦN TÀI KHOẢN (Zero-Account) & Xoay vòng Proxy Pool
     strategies = []
     if is_youtube:
-        # Chiến lược 1: PO Token ẩn danh nếu server đang chạy trên cổng 4416 hoặc có /opt/bgutil
-        if is_pot_server_alive("127.0.0.1", 4416) or os.path.exists("/opt/bgutil"):
-            strategies.append(("Chiến lược 1 (PO Token Ẩn Danh - mweb/web)", {
-                "extractor_args": {
-                    "youtube": {"player_client": ["mweb", "web"]},
-                    "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]}
-                }
+        proxy_pool = parse_proxy_pool()
+        pot_alive = is_pot_server_alive("127.0.0.1", 4416) or os.path.exists("/opt/bgutil")
+
+        if proxy_pool:
+            selected_proxies = proxy_pool[:5]
+            for p_idx, proxy_url in enumerate(selected_proxies, 1):
+                p_display = get_proxy_display(proxy_url)
+                # 1. Thử proxy kết hợp với bgutil PO Token (nếu server bgutil sẵn sàng)
+                if pot_alive:
+                    strategies.append((f"Proxy [{p_idx}/{len(selected_proxies)}] {p_display} + PO Token (mweb/web)", {
+                        "proxy": proxy_url,
+                        "extractor_args": {
+                            "youtube": {"player_client": ["mweb", "web"]},
+                            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]}
+                        }
+                    }))
+                # 2. Thử proxy với Android VR / iOS
+                strategies.append((f"Proxy [{p_idx}/{len(selected_proxies)}] {p_display} + Android VR/iOS", {
+                    "proxy": proxy_url,
+                    "extractor_args": {
+                        "youtube": {"player_client": ["android_vr", "ios", "tv_embedded"]}
+                    }
+                }))
+        else:
+            # Không cấu hình proxy nào -> Giữ nguyên cơ chế tải trực tiếp hiện tại
+            # Chiến lược 1: PO Token ẩn danh nếu server đang chạy trên cổng 4416 hoặc có /opt/bgutil
+            if pot_alive:
+                strategies.append(("Chiến lược 1 (PO Token Ẩn Danh - mweb/web)", {
+                    "extractor_args": {
+                        "youtube": {"player_client": ["mweb", "web"]},
+                        "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]}
+                    }
+                }))
+            # Chiến lược 2: Android VR / TV Embedded (không cần login)
+            strategies.append(("Chiến lược 2 (Android VR / TV Embedded - Zero Account)", {
+                "extractor_args": {"youtube": {"player_client": ["android_vr", "tv_embedded"]}}
             }))
-        # Chiến lược 2: Android VR / TV Embedded (không cần login)
-        strategies.append(("Chiến lược 2 (Android VR / TV Embedded - Zero Account)", {
-            "extractor_args": {"youtube": {"player_client": ["android_vr", "tv_embedded"]}}
-        }))
-        # Chiến lược 3: iOS / Web Safari (single stream MP4)
-        strategies.append(("Chiến lược 3 (iOS / Web Safari - Single Stream MP4)", {
-            "format": "best[ext=mp4]/best",
-            "extractor_args": {"youtube": {"player_client": ["ios", "web_safari"]}}
-        }))
+            # Chiến lược 3: iOS / Web Safari (single stream MP4)
+            strategies.append(("Chiến lược 3 (iOS / Web Safari - Single Stream MP4)", {
+                "format": "best[ext=mp4]/best",
+                "extractor_args": {"youtube": {"player_client": ["ios", "web_safari"]}}
+            }))
     else:
         strategies.append(("Universal Link (Bilibili/TikTok/Douyin)", {}))
 
@@ -8062,8 +8151,14 @@ def api_download_video_from_url():
                 try: os.remove(os.path.join(ws_dir, f))
                 except Exception: pass
 
-        update_progress(10, f"Đang thử [{idx}/{len(strategies)}]: {label}...", ws_id=ws_id)
         ydl_opts = {**base_opts, **extra_opts}
+        # Bỏ source_address khi dùng proxy để tránh xung đột socket
+        if ydl_opts.get("proxy"):
+            ydl_opts.pop("source_address", None)
+            p_log = get_proxy_display(ydl_opts.get("proxy"))
+            print(f"[Proxy] Đang thử tải [{idx}/{len(strategies)}] qua Proxy: {p_log} ({label})", flush=True)
+
+        update_progress(10, f"Đang thử [{idx}/{len(strategies)}]: {label}...", ws_id=ws_id)
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
