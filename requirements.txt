@@ -12,4 +12,5 @@ kaggle>=1.6.14
 six>=1.16.0
 yt-dlp[default,curl-cffi]
 curl_cffi
+bgutil-ytdlp-pot-provider
 audioop-lts; python_version >= '3.13'
