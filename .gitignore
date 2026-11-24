@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak
+*.turn2_bak
+*.exe
+
+# Session and temp dirs
+temp_session/
+projects/
+server_jobs/
+workspaces/
+kaggle_worker_build/
+
+# Heavy binaries and voice models
+bin/
+piper_models/
+
+# Sensitive local credentials & logs
+youtube_cookies.json
+yt_dl_cookies.txt
+yt_cookies.txt
+cookies.txt
+*.log

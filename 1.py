@@ -18,7 +18,7 @@ import asyncio
 import subprocess
 import webbrowser
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Timer, Thread, Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
@@ -897,9 +897,6 @@ def save_cloud_config(cfg, ws_id=None):
     except Exception as e:
         print(f"[!] Lỗi lưu cloud config workspace {ws_id}: {e}", flush=True)
     return cur
-    with open(CLOUD_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(current, f, ensure_ascii=False, indent=2)
-    return current
 
 # ==================== MODULE 7: MÃ NGUỒN TỰ HÀNH CLOUD WORKER (KÈM DVD WATERMARK & LOGO) ====================
 CLOUD_WORKER_SCRIPT_TEMPLATE = r'''import os, sys, re, time, json, math, site, shutil, tarfile, hashlib, asyncio, importlib, subprocess, ctypes, wave, threading
@@ -2780,7 +2777,6 @@ HTML_TEMPLATE = """
             border-radius: 999px;
             transition: width 0.3s ease;
         }
-        }
 
         /* ========== HOLOGRAPHIC HEADER (CLEAN & FAST) ========== */
         .holo-header {
@@ -3111,6 +3107,10 @@ HTML_TEMPLATE = """
 
                 <button id="btnAutoAll" onclick="runAllSteps()" class="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-500 via-indigo-600 to-purple-600 hover:brightness-110 active:scale-95 text-white text-xs font-black shadow-lg shadow-sky-500/25 flex items-center gap-2 transition">
                     <i class="fa-solid fa-bolt"></i> Tự Động A → Z
+                </button>
+
+                <button id="btnStopCloud" onclick="stopCloudJob()" class="hidden px-3.5 py-2 rounded-xl bg-rose-600/30 hover:bg-rose-600/50 text-rose-300 border border-rose-500/40 text-xs font-bold transition flex items-center gap-1.5" title="Dừng ngay tác vụ Cloud">
+                    <i class="fa-solid fa-stop"></i> Dừng Cloud
                 </button>
 
                 <a id="downloadBtn" href="/temp_session/output_vietsub.mp4" download="output_vietsub.mp4" class="hidden px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black flex items-center gap-1.5 shadow-lg shadow-emerald-500/25 transition">
@@ -4284,12 +4284,16 @@ HTML_TEMPLATE = """
                     const res = await fetch('/api/tunnel/info');
                     remoteTunnelData = await res.json();
                     const lbl = document.getElementById('remoteUrlText');
-                    if (remoteTunnelData.public_url) {
-                        lbl.innerText = "Copy Link Trạm";
-                        lbl.className = "text-emerald-300 font-bold";
+                    if (lbl) {
+                        if (remoteTunnelData.public_url) {
+                            lbl.innerText = "Copy Link Trạm";
+                            lbl.className = "text-emerald-300 font-bold";
+                            break;
+                        } else if (remoteTunnelData.lan_url) {
+                            lbl.innerText = `LAN: ${remoteTunnelData.lan_url.replace('http://', '')}`;
+                        }
+                    } else if (remoteTunnelData.public_url) {
                         break;
-                    } else {
-                        lbl.innerText = `LAN: ${remoteTunnelData.lan_url.replace('http://', '')}`;
                     }
                 } catch (e) {}
                 await new Promise(r => setTimeout(r, 2000));
@@ -4624,9 +4628,17 @@ HTML_TEMPLATE = """
             }
         }
 
+        function toggleStopCloudBtn(show) {
+            const btn = document.getElementById('btnStopCloud');
+            if (btn) {
+                if (show) btn.classList.remove('hidden');
+                else btn.classList.add('hidden');
+            }
+        }
+
         async function stopCloudJob() {
             await fetch('/api/cloud/cancel', { method: 'POST' });
-            document.getElementById('btnStopCloud').classList.add('hidden');
+            toggleStopCloudBtn(false);
             setStatus(0, "Đã gửi lệnh ngắt phiên Cloud ngay lập tức!");
         }
 
@@ -4642,7 +4654,7 @@ HTML_TEMPLATE = """
 
             if (typeof syncAddonSettings === 'function') await syncAddonSettings();
 
-            document.getElementById('btnStopCloud').classList.remove('hidden');
+            toggleStopCloudBtn(true);
             startPolling();
 
             const devId = (typeof getDeviceFingerprint === 'function') ? getDeviceFingerprint() : (localStorage.getItem('nexus_device_id') || '');
@@ -4670,7 +4682,7 @@ HTML_TEMPLATE = """
                 const startData = await startRes.json();
                 if (startData.error) {
                     await stopPollingAndSync();
-                    document.getElementById('btnStopCloud').classList.add('hidden');
+                    toggleStopCloudBtn(false);
                     if (startData.error.includes("Cấu Hình Cloud")) openCloudModal();
                     alert(startData.error);
                     return false;
@@ -4701,7 +4713,7 @@ HTML_TEMPLATE = """
 
                     if (stData.status === 'completed') {
                         await stopPollingAndSync();
-                        document.getElementById('btnStopCloud').classList.add('hidden');
+                        toggleStopCloudBtn(false);
                         if (stData.output_ready) {
                             const outVideo = document.getElementById('outputVideo');
                             document.getElementById('outputPlaceholder').classList.add('hidden');
@@ -4716,14 +4728,14 @@ HTML_TEMPLATE = """
                         return true;
                     } else if (stData.status === 'failed' || stData.status === 'cancelled') {
                         await stopPollingAndSync();
-                        document.getElementById('btnStopCloud').classList.add('hidden');
+                        toggleStopCloudBtn(false);
                         if (stData.error) alert("Lỗi trên Cloud Worker: " + stData.error);
                         return false;
                     }
                 }
             } catch (err) {
                 await stopPollingAndSync();
-                document.getElementById('btnStopCloud').classList.add('hidden');
+                toggleStopCloudBtn(false);
                 alert("Lỗi điều phối Cloud: " + err);
                 return false;
             }
@@ -5331,7 +5343,8 @@ HTML_TEMPLATE = """
             const btn = document.getElementById('btnDownloadUrl');
             btn.disabled = true;
             btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Đang tải...`;
-            setStatus(15, `Đang kết nối & tải video từ link: ${url.slice(0, 35)}...`);
+            setStatus(10, `Đang kết nối & tải video từ link: ${url.slice(0, 35)}...`);
+            startPolling();
 
             try {
                 const res = await fetch('/api/video/download_url', {
@@ -5340,13 +5353,15 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({ url })
                 });
                 const data = await res.json();
+                await stopPollingAndSync();
                 if (!data.ok) {
                     alert(data.error || "Không thể tải video từ link này!");
                     setStatus(0, "Lỗi tải video từ link.");
                     return;
                 }
                 input.value = '';
-                video.src = data.video_url;
+                const cacheBuster = (data.video_url.includes('?') ? '&' : '?') + 't=' + Date.now();
+                video.src = data.video_url + cacheBuster;
                 video.load();
                 const shortTitle = (data.title || "input_video.mp4").slice(0, 35);
                 document.getElementById('videoStatusBadge').innerText = "Đã nạp Video";
@@ -5360,6 +5375,7 @@ HTML_TEMPLATE = """
                 setStatus(100, `Đã tải & nạp thành công video: ${shortTitle}!`);
                 showToast(`✅ Đã tải và nạp video thành công: ${shortTitle}! Sẵn sàng bấm A → Z.`, 5000);
             } catch (err) {
+                await stopPollingAndSync();
                 alert("Lỗi kết nối khi tải video: " + err.message);
                 setStatus(0, "Lỗi kết nối.");
             } finally {
@@ -7783,6 +7799,37 @@ def upload_video():
     audio_ok = has_audio_stream(video_path)
     return jsonify({"status": "ok", "video_url": f"/workspace/{ws_id}/input_video.mp4?t={int(time.time())}", "has_audio": audio_ok, "workspace": ws_id})
 
+def export_youtube_cookies_netscape(dest_path):
+    """Xuất cookie từ youtube_cookies.json hoặc nexus_youtube_addon sang chuẩn Netscape cho yt-dlp"""
+    try:
+        c_dict = None
+        cookie_json_path = os.path.join(BASE_DIR, "youtube_cookies.json")
+        if os.path.exists(cookie_json_path):
+            with open(cookie_json_path, "r", encoding="utf-8") as f_c:
+                c_dict = json.load(f_c)
+        if not c_dict:
+            try:
+                from nexus_youtube_addon import load_saved_cookies
+                c_dict = load_saved_cookies()
+            except Exception:
+                pass
+        if not c_dict or not isinstance(c_dict, dict):
+            return None
+        # Bỏ qua nếu không có cookie đăng nhập thực sự
+        if not any(k in c_dict for k in ("SID", "SAPISID", "LOGIN_INFO", "__Secure-1PSID")):
+            return None
+        lines = ["# Netscape HTTP Cookie File", "# Generated by Nexus Studio"]
+        for k, v in c_dict.items():
+            val = str(v).replace("\n", "").replace("\r", "")
+            lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{val}")
+            lines.append(f".google.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{val}")
+        with open(dest_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        return dest_path
+    except Exception as e:
+        print(f"[!] Không xuất được cookies.txt: {e}", flush=True)
+        return None
+
 @app.route("/api/video/download_url", methods=["POST"])
 def api_download_video_from_url():
     """Tự động tải video từ YouTube, Bilibili, Douyin, TikTok... về workspace và nạp thẳng vào tool"""
@@ -7813,158 +7860,165 @@ def api_download_video_from_url():
     ws_id = get_workspace_id(request)
     ws_dir = get_workspace_dir(request)
     os.makedirs(ws_dir, exist_ok=True)
-    video_path = os.path.join(ws_dir, "input_video.mp4")
+    final_mp4 = os.path.join(ws_dir, "input_video.mp4")
+    tmp_prefix = os.path.join(ws_dir, f"dl_tmp_{int(time.time())}")
+    cookies_txt_path = os.path.join(ws_dir, "yt_dl_cookies.txt")
 
     # Xóa file cũ
-    for fp in [video_path, os.path.join(TEMP_DIR, "input_video.mp4")]:
+    for fp in [final_mp4, os.path.join(TEMP_DIR, "input_video.mp4")]:
         if os.path.exists(fp):
             try: os.remove(fp)
             except Exception: pass
 
     try:
+        import yt_dlp
+    except ImportError:
+        update_progress(5, "Đang cài đặt yt-dlp & curl_cffi...", ws_id=ws_id)
         try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp", "curl_cffi"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             import yt_dlp
-        except ModuleNotFoundError:
-            # Tự động cài đặt nóng yt-dlp tại runtime nếu môi trường Railway/VPS chưa kịp build
-            import sys
-            try:
-                subprocess.run([sys.executable, "-m", "pip", "install", "yt-dlp", "--no-cache-dir"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                import yt_dlp
-            except Exception as pe:
-                return jsonify({"ok": False, "error": f"Máy chủ Railway chưa có thư viện 'yt-dlp' và không thể tự cài ({pe}). Vui lòng thêm dòng 'yt-dlp>=2024.0.0' vào file requirements.txt trên GitHub Railway rồi bấm Redeploy!"}), 500
+        except Exception as pe:
+            return jsonify({"ok": False, "error": f"Không thể tự động cài đặt yt-dlp ({pe}). Vui lòng thêm yt-dlp vào requirements.txt!"}), 500
 
-        target_template = os.path.join(ws_dir, "dl_temp.%(ext)s")
-        is_bili = any(x in url.lower() for x in ['bilibili.com', 'b23.tv'])
-        is_yt = any(x in url.lower() for x in ['youtube.com', 'youtu.be'])
-        req_headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,vi;q=0.7'
+    manual_cookie_file = os.path.join(BASE_DIR, "cookies.txt")
+    active_cookie_file = manual_cookie_file if (os.path.exists(manual_cookie_file) and os.path.getsize(manual_cookie_file) > 50) else export_youtube_cookies_netscape(cookies_txt_path)
+
+    is_youtube = any(d in url.lower() for d in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
+    is_bili = any(x in url.lower() for x in ('bilibili.com', 'b23.tv'))
+
+    def _progress_hook(d):
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            dl = d.get("downloaded_bytes") or 0
+            if total > 0:
+                pct = 15 + int((dl / total) * 75)
+                update_progress(min(90, pct), f"Đang tải video ({int(dl/total*100)}%)...", ws_id=ws_id)
+        elif d.get("status") == "finished":
+            update_progress(92, "Đang đóng gói chuẩn MP4 (H.264/AAC)...", ws_id=ws_id)
+
+    base_opts = {
+        "outtmpl": tmp_prefix + ".%(ext)s",
+        "format": "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]/bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "nocheckcertificate": True,
+        "source_address": "0.0.0.0",
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
+        "progress_hooks": [_progress_hook],
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,vi;q=0.7"
         }
-        if is_bili:
-            req_headers['Referer'] = 'https://www.bilibili.com/'
-            # Header Range: bytes=0- là BẮT BUỘC để vượt qua tường lửa Tencent CDN (chống lỗi HTTP Error 567)
-            req_headers['Range'] = 'bytes=0-'
-        else:
-            req_headers['Referer'] = 'https://www.google.com/'
+    }
 
-        ydl_opts = {
-            'format': 'bestvideo+bestaudio/best',
-            'outtmpl': target_template,
-            'merge_output_format': 'mp4',
-            'overwrites': True,
-            'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'retries': 10,
-            'fragment_retries': 10
-        }
-        if not is_yt:
-            ydl_opts['http_headers'] = req_headers
+    if is_bili:
+        base_opts["http_headers"]["Referer"] = "https://www.bilibili.com/"
+        base_opts["http_headers"]["Range"] = "bytes=0-"
 
-        # Vượt tường lửa bot check ("Sign in to confirm you're not a bot") của YouTube trên Cloud/Datacenter (Railway/VPS)
-        if is_yt:
-            # android_vr và ios là các client vượt qua tường lửa bot-check tốt nhất của YouTube
-            ydl_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['android_vr', 'ios', 'android']
-                }
-            }
-            # Tự động nạp Cookie Netscape từ youtube_cookies.json nếu có
-            try:
-                ck_data = None
-                cookie_json_path = os.path.join(BASE_DIR, "youtube_cookies.json")
-                if os.path.exists(cookie_json_path):
-                    with open(cookie_json_path, "r", encoding="utf-8") as f_c:
-                        ck_data = json.load(f_c)
-                if not ck_data:
-                    try:
-                        from nexus_youtube_addon import load_saved_cookies
-                        ck_data = load_saved_cookies()
-                    except Exception:
-                        pass
-                if ck_data and isinstance(ck_data, dict):
-                    yt_cookie_file = os.path.join(ws_dir, "yt_cookies.txt")
-                    with open(yt_cookie_file, "w", encoding="utf-8") as f_out:
-                        f_out.write("# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n")
-                        for ck_k, ck_v in ck_data.items():
-                            f_out.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{ck_k}\t{ck_v}\n")
-                            f_out.write(f".google.com\tTRUE\t/\tTRUE\t2147483647\t{ck_k}\t{ck_v}\n")
-                    ydl_opts['cookiefile'] = yt_cookie_file
-            except Exception as e_ck:
-                print(f"[!] Warning cookie export for yt-dlp: {e_ck}")
+    strategies = []
+    if is_youtube:
+        if active_cookie_file:
+            strategies.append(("YouTube + Cookies (Web/TV)", {
+                "cookiefile": active_cookie_file,
+                "extractor_args": {"youtube": {"player_client": ["web", "tv_simply"]}},
+            }))
+        strategies.append(("YouTube Client Android VR / iOS", {
+            "extractor_args": {"youtube": {"player_client": ["android_vr", "ios", "tv_embedded"]}},
+        }))
+        strategies.append(("YouTube Fallback Single Stream", {
+            "format": "best[ext=mp4]/best",
+            "extractor_args": {"youtube": {"player_client": ["android", "web_safari"]}},
+        }))
+    else:
+        strategies.append(("Universal Link (Bilibili/TikTok/Douyin)", {}))
 
-        # Tải video với cơ chế đa tầng fallback tự động
-        info = None
-        clients_to_try = [
-            ['android_vr', 'ios', 'android'],
-            ['android_vr'],
-            ['ios'],
-            ['android'],
-            ['mweb']
-        ] if is_yt else [None]
-        last_dl_err = None
+    downloaded_file = None
+    video_title = "input_video"
+    duration = 0
+    last_error = ""
 
-        for cl in clients_to_try:
-            if is_yt and cl:
-                ydl_opts['extractor_args'] = {'youtube': {'player_client': cl}}
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
+    for idx, (label, extra_opts) in enumerate(strategies, start=1):
+        for f in os.listdir(ws_dir):
+            if f.startswith(os.path.basename(tmp_prefix)):
+                try: os.remove(os.path.join(ws_dir, f))
+                except Exception: pass
+
+        update_progress(10, f"Đang thử tải [{idx}/{len(strategies)}]: {label}...", ws_id=ws_id)
+        ydl_opts = {**base_opts, **extra_opts}
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
                 if info:
-                    break
-            except Exception as e_dl:
-                last_dl_err = e_dl
-                if not is_yt:
-                    break
-                print(f"[!] Thử tải YouTube với client {cl} gặp lỗi: {e_dl}", flush=True)
+                    video_title = (info.get("title") or "input_video").strip()
+                    duration = info.get("duration") or 0
+                    expected = ydl.prepare_filename(info)
+                    candidates = [
+                        os.path.splitext(expected)[0] + ".mp4",
+                        expected,
+                    ]
+                    for f in os.listdir(ws_dir):
+                        if f.startswith(os.path.basename(tmp_prefix)) and not f.endswith((".part", ".ytdl")):
+                            candidates.append(os.path.join(ws_dir, f))
 
-        if not info and last_dl_err:
-            return jsonify({"ok": False, "error": f"Lỗi tải video: {last_dl_err}"}), 400
-
-        video_title = (info.get("title") if info else None) or "Video từ Link"
-        duration = (info.get("duration") if info else None) or 0
-
-        downloaded_file = None
-        for cand in os.listdir(ws_dir):
-            if cand.startswith("dl_temp."):
-                downloaded_file = os.path.join(ws_dir, cand)
+                    for cand in candidates:
+                        if os.path.exists(cand) and os.path.getsize(cand) > 10_000:
+                            downloaded_file = cand
+                            break
+            if downloaded_file:
                 break
+        except Exception as e:
+            last_error = str(e)
+            print(f"[!] Chiến lược '{label}' thất bại: {last_error}", flush=True)
 
-        if not downloaded_file or not os.path.exists(downloaded_file):
-            return jsonify({"ok": False, "error": "Không thể tải video từ link này. Vui lòng kiểm tra lại đường dẫn!"}), 400
+    if os.path.exists(cookies_txt_path):
+        try: os.remove(cookies_txt_path)
+        except Exception: pass
 
-        if downloaded_file.endswith(".mp4"):
-            shutil.move(downloaded_file, video_path)
+    if not downloaded_file:
+        hint = ""
+        if "Sign in to confirm" in last_error or "bot" in last_error.lower():
+            hint = " ➜ YouTube đang yêu cầu xác thực chống Bot trên IP máy chủ. Hãy dán Cookie YouTube mới (xuất bằng Get cookies.txt LOCALLY) ở Tab 5 rồi tải lại!"
+        elif "403" in last_error:
+            hint = " ➜ Lỗi 403 từ YouTube. Hãy cập nhật yt-dlp lên bản mới nhất và đảm bảo môi trường có Node.js."
+        elif "is unusual and will be skipped" in last_error or "HTTP Error 404" in last_error:
+            hint = " ➜ Không tìm thấy video từ link này (Lỗi 404 hoặc link sai). Với Bilibili, mã BV chuẩn gồm 12 ký tự (Ví dụ: BV1atse6EEfx)."
+        update_progress(0, "Tải video thất bại.", ws_id=ws_id)
+        return jsonify({"ok": False, "error": f"Không tải được video: {last_error[:280]}{hint}"}), 400
+
+    # Đảm bảo file cuối cùng là input_video.mp4 chuẩn tương thích trình duyệt
+    try:
+        if downloaded_file.lower().endswith(".mp4"):
+            shutil.move(downloaded_file, final_mp4)
         else:
-            subprocess.run(["ffmpeg", "-y", "-i", downloaded_file, "-c", "copy", video_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
-                subprocess.run(["ffmpeg", "-y", "-i", downloaded_file, "-c:v", "libx264", "-c:a", "aac", video_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", downloaded_file, "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-movflags", "+faststart", final_mp4],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
             try: os.remove(downloaded_file)
             except Exception: pass
+    except Exception as e_mv:
+        return jsonify({"ok": False, "error": f"Lỗi đóng gói MP4: {e_mv}"}), 500
 
-        if not os.path.exists(video_path) or os.path.getsize(video_path) < 100:
-            return jsonify({"ok": False, "error": "Lỗi định dạng video sau khi tải về!"}), 500
+    try:
+        shutil.copy2(final_mp4, os.path.join(TEMP_DIR, "input_video.mp4"))
+    except Exception:
+        pass
 
-        try:
-            shutil.copy2(video_path, os.path.join(TEMP_DIR, "input_video.mp4"))
-        except Exception:
-            pass
-
-        LAST_AUDIO_SIGNATURE["sig"] = None
-        audio_ok = has_audio_stream(video_path)
-        return jsonify({
-            "ok": True,
-            "title": video_title,
-            "duration": duration,
-            "video_url": f"/workspace/{ws_id}/input_video.mp4?t={int(time.time())}",
-            "has_audio": audio_ok
-        })
-    except Exception as e:
-        err_msg = str(e)
-        if "is unusual and will be skipped" in err_msg or "HTTP Error 404" in err_msg:
-            err_msg = "Không tìm thấy video từ link này (Lỗi 404 hoặc link sai). Với Bilibili, mã BV chuẩn gồm 12 ký tự (Ví dụ: BV1atse6EEfx), bạn vui lòng kiểm tra lại link gốc xem có bị thiếu ký tự không nhé!"
-        return jsonify({"ok": False, "error": f"Lỗi tải video: {err_msg}"}), 500
+    LAST_AUDIO_SIGNATURE["sig"] = None
+    has_aud = has_audio_stream(final_mp4)
+    update_progress(100, f"Đã tải xong video: {video_title[:40]}", ws_id=ws_id)
+    return jsonify({
+        "ok": True,
+        "title": video_title,
+        "duration": duration,
+        "has_audio": has_aud,
+        "video_url": f"/workspace/{ws_id}/input_video.mp4?t={int(time.time())}"
+    })
 
 @app.route("/merge_audio", methods=["POST"])
 def merge_audio():

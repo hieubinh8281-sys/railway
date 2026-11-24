@@ -82,40 +82,30 @@ def parse_cookies_input(cookie_input):
 
     return cookies_dict
 
-EMBEDDED_DEFAULT_COOKIES = {
-    "HSID": "ANFW1DDqRNIVvnfTT",
-    "SSID": "AMWOXd0CVtGNe2tcI",
-    "APISID": "PS46ZEr8R5wGuKf7/AO55IzshUjAvmxrJ6",
-    "SAPISID": "ZlyTaHU4P6zurTK8/Ao2oBqyJ0cxf5l0wy",
-    "__Secure-1PAPISID": "ZlyTaHU4P6zurTK8/Ao2oBqyJ0cxf5l0wy",
-    "__Secure-3PAPISID": "ZlyTaHU4P6zurTK8/Ao2oBqyJ0cxf5l0wy",
-    "LOGIN_INFO": "AFmmF2swRgIhAJMCD92OPkXH21qlPMBqPQH7bl5vxUTunMDWRLEojEjkAiEA5_QkRymiZj5E15Nq5KOkvHccAL6XBVau7tOWfO5rLxQ:QUQ3MjNmell6OS1YWVJFRXNXYXdnOUF0ay1fWVFMYndMLVVHQTlITTN1WG82bTlYXzAxMGNUOXROSzR6dUlHUUVMMWZsT2NZbzNudzFNUFpfbWx5UjJtcld3YlItRmdrM3BESVc3Zkx6ZG9nRkU1am1SdC1ETG1QY3N0MzMzUlpUV2daa2lJVlprcjhuYTQ0SEJJWUxMYl9DUURVT1d2V1l3",
-    "_ga": "GA1.1.689472785.1783261520",
-    "_ga_VCGEPY40VB": "GS2.1.s1783261520$o1$g1$t1783261632$j60$l0$h0",
-    "PREF": "tz=Asia.Saigon",
-    "__Secure-BUCKET": "CCA",
-    "SID": "g.a000EwlLdQagxHEXVk_55aRPt5Ezyai8G28O3vyYNfyU1dTTNFSCXX58q3JKbh2QYy5FUWK0MQACgYKAf0SARISFQHGX2MioZKisTYsct0wbgWwFeQcChoVAUF8yKpmVqgq7SbuafwKt8HJD2gy0076",
-    "__Secure-1PSID": "g.a000EwlLdQagxHEXVk_55aRPt5Ezyai8G28O3vyYNfyU1dTTNFSCfLHuB-Kqd1fP5jZ0opN2MAACgYKARESARISFQHGX2MigcbGb77KqKmA4h6pg5NKeRoVAUF8yKrH20JEVWf9Gb4efPe3XGqB0076",
-    "__Secure-3PSID": "g.a000EwlLdQagxHEXVk_55aRPt5Ezyai8G28O3vyYNfyU1dTTNFSCXMoXscJn9hyG3RELrdHv2gACgYKATQSARISFQHGX2Miuhk6Y3L3uBYlAKAvsbreNhoVAUF8yKqZe_U3edbpdL99okgsGcta0076",
-    "__Secure-1PSIDTS": "sidts-CjUBnJZzahiIUD7c6Rr653WGD-xJ2JwkM98tHW4GGvBoZtKyePC31fJWJoiZJzsyLL7mFxtZcBAA",
-    "__Secure-3PSIDTS": "sidts-CjUBnJZzahiIUD7c6Rr653WGD-xJ2JwkM98tHW4GGvBoZtKyePC31fJWJoiZJzsyLL7mFxtZcBAA",
-    "SIDCC": "APD_SKGxzvdDxqrwnaqu9odOFuP9emb4ZmG80Xnqzg2CAehQ5IPrI12CiQfJ20ppXt3lKoiIwQ",
-    "__Secure-1PSIDCC": "APD_SKFBXwEKg-cYeyfZRETVfVD9fl57DP7omZDxSl_a7_7jD-IuTwFOkJopSQgJhdMctnaryw",
-    "__Secure-3PSIDCC": "APD_SKG3qrxAkKnDSsWYnQFo1Pr4zKYn68q_rOIIDiyjPVBtyJzxj_5b_zXRL9IYezYgQZ7iR0c",
-    "CONSISTENCY": "AIudn8qH6J4piMJKC1qgWnMu3EOctI8_i4D_k1wLtFLrwiSWMzWC-8FDWxHsRZX5LqaeDWQH9yUBitFH2m-pLsIuSRj8qVv7ekZb9V_B5sPtfP-_sUP6UUKdO1g",
-    "VISITOR_INFO1_LIVE": "yBsopdG0Ysw",
-    "VISITOR_PRIVACY_METADATA": "CgJWThIEGgAgEw%3D%3D",
-    "YSC": "woKNyn1-h9I"
-}
+EMBEDDED_DEFAULT_COOKIES = {}
 
 def load_saved_cookies():
-    """Đọc cookie đã lưu từ file, tự động dùng EMBEDDED_DEFAULT_COOKIES làm dự phòng bền vững"""
+    """Đọc cookie đã lưu từ file hoặc biến môi trường YOUTUBE_COOKIES_B64 trên Railway"""
     if os.path.exists(YOUTUBE_COOKIES_FILE):
         try:
             with open(YOUTUBE_COOKIES_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
                 if d and isinstance(d, dict):
                     return d
+        except Exception:
+            pass
+    # Hỗ trợ nạp từ biến môi trường trên Railway (base64 hoặc chuỗi thuần)
+    env_b64 = os.environ.get("YOUTUBE_COOKIES_B64")
+    if env_b64:
+        try:
+            raw = base64.b64decode(env_b64).decode("utf-8")
+            return parse_cookies_input(raw)
+        except Exception:
+            pass
+    env_raw = os.environ.get("YOUTUBE_COOKIES")
+    if env_raw:
+        try:
+            return parse_cookies_input(env_raw)
         except Exception:
             pass
     return dict(EMBEDDED_DEFAULT_COOKIES)
@@ -925,6 +915,12 @@ def api_youtube_upload_custom_thumbnail():
         "message": "Đã chọn Thumbnail của bạn thành công! Ảnh này sẽ được tự động tải lên YouTube cùng Video."
     })
 
+@youtube_bp.route("/api/youtube/thumbnail_view/<path:filename>")
+def api_youtube_thumbnail_view(filename):
+    """Phục vụ file thumbnail cho trình duyệt xem trước và VPS GitHub tải về"""
+    clean_name = os.path.basename(filename)
+    return send_from_directory(THUMBNAIL_DIR, clean_name)
+
 @youtube_bp.route("/api/youtube/upload_local_video_for_publish", methods=["POST"])
 def api_youtube_upload_local_video_for_publish():
     """Nhận file video từ máy tính của người dùng để chuẩn bị đăng lên YouTube"""
@@ -1281,7 +1277,7 @@ YOUTUBE_UI_HTML = r"""
                 <label class="text-[10px] text-slate-400 block mb-0.5">Logo/Tên Kênh Góc Trên Phải:</label>
                 <input type="text" id="ytThumbLogo" value="Lg Media | Vietsub" class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 outline-none"/>
             </div>
-            <button onclick="createManhuaThumbnail('manhua')" class="w-full mt-1 py-1.5 px-2 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 text-[11px] font-bold transition flex items-center justify-center gap-1.5">
+            <button onclick="createManhuaThumbnail('manhua', event)" class="w-full mt-1 py-1.5 px-2 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 text-[11px] font-bold transition flex items-center justify-center gap-1.5">
                 <i class="fa-solid fa-wand-magic-sparkles"></i> Vẽ Thumbnail Anime 2 Dòng Chữ (Cách 2)
             </button>
         </div>
@@ -1441,8 +1437,8 @@ function previewOrigChineseThumb(event) {
 }
 
 function clearOrigChineseThumb() {
-    const fileInput = document.getElementById('ytThumbOriginalFile');
-    const urlInput = document.getElementById('ytThumbOriginalUrl');
+    const fileInput = document.getElementById('ytThumbCustomFile') || document.getElementById('ytThumbOriginalFile');
+    const urlInput = document.getElementById('ytThumbCustomUrl') || document.getElementById('ytThumbOriginalUrl');
     if (fileInput) fileInput.value = '';
     if (urlInput) urlInput.value = '';
     const badge = document.getElementById('origThumbPreviewBadge');
@@ -1453,7 +1449,8 @@ function clearOrigChineseThumb() {
 }
 
 function loadThumbFromUrl() {
-    const url = document.getElementById('ytThumbOriginalUrl').value.trim();
+    const urlInput = document.getElementById('ytThumbCustomUrl') || document.getElementById('ytThumbOriginalUrl');
+    const url = urlInput ? urlInput.value.trim() : '';
     if (!url) return alert('Vui lòng dán link URL ảnh thumbnail gốc!');
     const badge = document.getElementById('origThumbPreviewBadge');
     const nameSpan = document.getElementById('origThumbName');
@@ -1584,17 +1581,19 @@ async function useMyOwnThumbnail() {
     }
 }
 
-async function createManhuaThumbnail(mode) {
+async function createManhuaThumbnail(mode, ev = null) {
     const line1 = document.getElementById('ytThumbLine1').value.trim();
     const line2 = document.getElementById('ytThumbLine2').value.trim();
     const logo = document.getElementById('ytThumbLogo').value.trim();
-    const fileInput = document.getElementById('ytThumbOriginalFile');
-    const urlInput = document.getElementById('ytThumbOriginalUrl');
+    const fileInput = document.getElementById('ytThumbCustomFile') || document.getElementById('ytThumbOriginalFile');
+    const urlInput = document.getElementById('ytThumbCustomUrl') || document.getElementById('ytThumbOriginalUrl');
 
-    const btn = event.currentTarget;
-    const orig = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang xử lý Thumbnail...';
+    const btn = (ev && ev.currentTarget) ? ev.currentTarget : ((typeof event !== 'undefined' && event && event.currentTarget) ? event.currentTarget : document.querySelector('button[onclick*="createManhuaThumbnail"]'));
+    const orig = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang xử lý Thumbnail...';
+    }
 
     try {
         const formData = new FormData();

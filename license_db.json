@@ -11,10 +11,13 @@
       "bound_device_id": null,
       "bound_ip": null,
       "bound_user_agent": null,
-      "last_active": null,
+      "last_active": "2026-11-19T18:24:19.915467",
       "tier": "basic",
       "quota_limit": 2,
-      "quota_used": 0
+      "quota_used": 1,
+      "device_usage": {
+        "DEV-IPHONE-001": 1
+      }
     },
     "NEXUS-VIP-PRO-DEMO": {
       "key": "NEXUS-VIP-PRO-DEMO",
@@ -28,8 +31,8 @@
       "bound_user_agent": null,
       "last_active": null,
       "tier": "pro",
-      "quota_limit": 100,
-      "quota_used": 0
+      "quota_limit": 250,
+      "quota_used": 5
     }
   }
 }

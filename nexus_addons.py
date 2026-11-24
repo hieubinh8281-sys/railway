@@ -491,7 +491,8 @@ pydub>=0.25.1
 Pillow>=10.0.0
 numpy>=1.24.0
 av>=12.0.0
-yt-dlp>=2024.0.0
+yt-dlp[default,curl-cffi]
+curl_cffi
 audioop-lts; python_version >= '3.13'
 """
 
@@ -501,9 +502,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV NO_BROWSER=1
 
-# Cài đặt FFmpeg và bộ Font Quốc tế / Tiếng Việt / CJK cho Railway
+# Cài đặt FFmpeg, Node.js (giải mã JS chữ ký YouTube) và bộ Font Quốc tế / Tiếng Việt / CJK cho Railway
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     ffmpeg \\
+    nodejs \\
     curl \\
     ca-certificates \\
     fonts-liberation \\
@@ -514,7 +516,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -U -r requirements.txt
 
 COPY . /app
 

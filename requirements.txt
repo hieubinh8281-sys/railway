@@ -10,5 +10,6 @@ av>=12.0.0
 static-ffmpeg>=2.5
 kaggle>=1.6.14
 six>=1.16.0
-yt-dlp>=2024.0.0
+yt-dlp[default,curl-cffi]
+curl_cffi
 audioop-lts; python_version >= '3.13'
